@@ -19,7 +19,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 class AudioCaptureEngine(
     private val sampleRate: Int = SAMPLE_RATE_HZ,
     private val chunkByteSize: Int = CHUNK_SIZE_BYTES,
-    private val audioSource: Int = MediaRecorder.AudioSource.MIC
+    private val audioSource: Int = MediaRecorder.AudioSource.VOICE_COMMUNICATION
 ) {
     private val isRecording = AtomicBoolean(false)
     private var captureJob: Job? = null
@@ -60,7 +60,7 @@ class AudioCaptureEngine(
                 return false
             }
 
-            if (audioSource == MediaRecorder.AudioSource.VOICE_COMMUNICATION && AcousticEchoCanceler.isAvailable()) {
+            if (AcousticEchoCanceler.isAvailable()) {
                 try {
                     echoCanceler = AcousticEchoCanceler.create(record.audioSessionId)?.apply { enabled = true }
                 } catch (error: Exception) {
@@ -100,6 +100,8 @@ class AudioCaptureEngine(
                             onChunk(buffer.clone())
                         }
                     }
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
                 } catch (e: Exception) {
                     Log.e(TAG, "Audio capture loop exception: ${e.message}", e)
                 } finally {

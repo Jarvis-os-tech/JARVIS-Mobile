@@ -66,7 +66,10 @@ class AudioPlaybackEngine(private val sampleRate: Int = SAMPLE_RATE_HZ) {
     private fun drainAudio() {
         try {
             while (!Thread.currentThread().isInterrupted) {
-                val chunk = queue.poll(5, java.util.concurrent.TimeUnit.MILLISECONDS)
+                val timeoutMs = synchronized(lock) {
+                    if (drained && queue.isEmpty()) 500L else 5L
+                }
+                val chunk = queue.poll(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS)
                 if (chunk != null) {
                     var offset = 0
                     while (offset < chunk.bytes.size && !Thread.currentThread().isInterrupted) {
@@ -91,15 +94,6 @@ class AudioPlaybackEngine(private val sampleRate: Int = SAMPLE_RATE_HZ) {
                     if (!drained && !hasPendingAudioLocked()) { drained = true; true } else false
                 }
                 if (notify) onPlaybackDrained?.invoke()
-
-                // If playback is completely drained and no chunks are queued, terminate worker to prevent 200 Hz CPU wakeups in standby
-                val shouldExit = synchronized(lock) {
-                    if (drained && queue.isEmpty()) {
-                        worker = null
-                        true
-                    } else false
-                }
-                if (shouldExit) break
             }
         } catch (_: InterruptedException) {
             // release() terminates the worker.

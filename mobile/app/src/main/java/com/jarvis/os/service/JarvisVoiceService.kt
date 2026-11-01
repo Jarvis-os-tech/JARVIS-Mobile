@@ -338,8 +338,8 @@ class JarvisVoiceService : Service() {
 
             when (vadResult.state) {
                 VadState.SPEECH -> {
-                    // Cut the speaker locally without waiting for a network round trip.
-                    if (vadResult.speechFrameCount >= 5 && playbackEngine.hasPendingAudio) {
+                    // Cut the speaker locally on deliberate user barge-in (sufficient duration and energy over speaker audio).
+                    if (vadResult.speechFrameCount >= 10 && vadResult.energy >= 2500.0 && playbackEngine.hasPendingAudio) {
                         synchronized(responseLock) {
                             if (!suppressOldResponse && playbackEngine.hasPendingAudio) {
                                 suppressOldResponse = true
