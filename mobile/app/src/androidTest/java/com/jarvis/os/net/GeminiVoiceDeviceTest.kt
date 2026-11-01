@@ -20,8 +20,7 @@ class GeminiVoiceDeviceTest {
         InstrumentationRegistry.getInstrumentation().startActivitySync(
             Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         )
-        val key = context.getSharedPreferences("jarvis_prefs", Context.MODE_PRIVATE)
-            .getString("gemini_api_key", "").orEmpty()
+        val key = com.jarvis.os.sync.ApiCredentials.gemini(context)
         assertTrue("A configured key is required", key.isNotBlank())
         val client = GeminiLiveClient()
         val deviceTools = DeviceToolClient(context)

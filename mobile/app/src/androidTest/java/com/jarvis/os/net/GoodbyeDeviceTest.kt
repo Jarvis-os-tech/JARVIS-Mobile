@@ -17,7 +17,7 @@ class GoodbyeDeviceTest {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
         instrumentation.startActivitySync(Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-        val key = context.getSharedPreferences("jarvis_prefs", Context.MODE_PRIVATE).getString("gemini_api_key", "").orEmpty()
+        val key = com.jarvis.os.sync.ApiCredentials.gemini(context)
         val tools = DeviceToolClient(context).declarations()
         val client = GeminiLiveClient()
         val called = CountDownLatch(1)

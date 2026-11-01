@@ -22,23 +22,11 @@ object QrPairingScanner {
     private const val KEY_ENDPOINT = "paired_endpoint"
     private const val KEY_GEMINI_KEY = "gemini_api_key"
 
-    private fun getSecurePrefs(context: Context): SharedPreferences {
-        return try {
-            val masterKey = MasterKey.Builder(context)
-                .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
-                .build()
-
-            EncryptedSharedPreferences.create(
-                context,
-                PREFS_FILE,
-                masterKey,
-                EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
-                EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
-            )
-        } catch (e: Exception) {
-            Log.w(TAG, "Falling back to standard SharedPreferences: ${e.message}")
-            context.getSharedPreferences(PREFS_FILE, Context.MODE_PRIVATE)
-        }
+    internal fun getSecurePrefs(context: Context): SharedPreferences {
+        val masterKey = MasterKey.Builder(context).setKeyScheme(MasterKey.KeyScheme.AES256_GCM).build()
+        return EncryptedSharedPreferences.create(context, PREFS_FILE, masterKey,
+            EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+            EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM)
     }
 
     /**
@@ -61,15 +49,13 @@ object QrPairingScanner {
             putString(KEY_ENDPOINT, payload.endpoint)
             putString("execution_endpoint", payload.executionEndpoint)
             payload.geminiApiKey?.let { putString(KEY_GEMINI_KEY, it) }
-            apply()
+            check(commit()) { "Could not save pairing securely" }
         }
 
-        // Also sync gemini key to general prefs for voice service access
         if (!payload.geminiApiKey.isNullOrBlank()) {
+            check(prefs.edit().putString("credential_source", "pc").commit())
             context.getSharedPreferences("jarvis_prefs", Context.MODE_PRIVATE)
-                .edit()
-                .putString("gemini_api_key", payload.geminiApiKey)
-                .apply()
+                .edit().remove("gemini_api_key").commit()
         }
 
         Log.i(TAG, "Device pairing established with ${payload.deviceId} on project ${payload.projectId}")
@@ -103,7 +89,10 @@ object QrPairingScanner {
     }
 
     fun clearPairing(context: Context) {
-        getSecurePrefs(context).edit().clear().apply()
+        getSecurePrefs(context).edit().apply {
+            listOf(KEY_IS_PAIRED, KEY_PROJECT_ID, KEY_DEVICE_ID, KEY_AUTH_TOKEN,
+                KEY_GCS_BUCKET, KEY_ENDPOINT, "execution_endpoint").forEach { remove(it) }
+        }.commit()
         Log.i(TAG, "Device pairing credentials cleared")
     }
 }

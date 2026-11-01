@@ -3,6 +3,27 @@
 Mobile source and phone releases live in
 [JARVIS-Mobile](https://github.com/Jarvis-os-tech/JARVIS-Mobile).
 
+## Choose your API setup
+
+On first launch, choose either **I have JARVIS on my PC** or **Use my own API key**.
+
+For PC setup, tell desktop JARVIS **“Open the phone pairing QR code.”** Scan it in
+the phone app. The QR shares the PC's configured Gemini key and device pairing
+credential; treat it as private. Other PC integrations continue using their
+existing keys through the shared PC executor. Only scan a QR from your own PC.
+
+Without PC JARVIS, paste your own **Gemini API key (required)**. Voice and native
+phone controls work without desktop pairing. OpenAI, Anthropic, and Groq fields
+are optional and may be left blank. They are saved for optional integrations;
+this version still uses Gemini for voice and does not enable those voice
+providers. Provider usage is billed to the key owner's account.
+
+Use **API keys and setup** to change setup later. Saving your own key switches
+to standalone mode and disconnects PC pairing; scan the PC QR to pair again.
+Keys are masked in the form, encrypted with Android Keystore-backed storage,
+excluded from app backups, and never included in the APK or update requests.
+Existing saved Gemini keys are migrated out of the old plaintext preference.
+
 ## Internet updates
 
 Tap **Update JARVIS** with Wi-Fi or mobile data enabled. The online channel works

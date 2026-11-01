@@ -62,6 +62,7 @@ import com.jarvis.os.overlay.HaloOrb
 import com.jarvis.os.overlay.OverlayUiState
 import com.jarvis.os.service.JarvisVoiceService
 import com.jarvis.os.sync.CloudMemorySyncWorker
+import com.jarvis.os.sync.ApiCredentials
 import com.jarvis.os.sync.QrPairingScanner
 import com.jarvis.os.update.MobileUpdater
 import kotlinx.coroutines.launch
@@ -70,6 +71,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        window.addFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
         handleIntent(intent)
 
         setContent {
@@ -84,12 +86,9 @@ class MainActivity : ComponentActivity() {
 
     override fun onStart() {
         super.onStart()
-        if (QrPairingScanner.isPaired(this)) {
-            val key = getSharedPreferences("jarvis_prefs", Context.MODE_PRIVATE)
-                .getString("gemini_api_key", "") ?: ""
-            if (key.isNotBlank()) {
-                startVoiceDaemon()
-            }
+        if (ApiCredentials.gemini(this).isNotBlank() &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+            startVoiceDaemon()
         }
     }
 
@@ -164,6 +163,9 @@ fun JarvisMobileScreen(
     }
     var isPaired by remember { mutableStateOf(QrPairingScanner.isPaired(context)) }
     var pairingInfo by remember { mutableStateOf(QrPairingScanner.getPairingPayload(context)) }
+    var hasVoiceKey by remember { mutableStateOf(ApiCredentials.gemini(context).isNotBlank()) }
+    var credentialSource by remember { mutableStateOf(ApiCredentials.source(context)) }
+    var showSetupDialog by remember { mutableStateOf(!hasVoiceKey) }
     var showPairDialog by remember { mutableStateOf(false) }
     var showQrScanner by remember { mutableStateOf(false) }
     var pairInputText by remember { mutableStateOf("") }
@@ -216,6 +218,13 @@ fun JarvisMobileScreen(
             )
 
             Spacer(modifier = Modifier.height(36.dp))
+
+            OutlinedButton(onClick = { showSetupDialog = true }, modifier = Modifier.fillMaxWidth()) {
+                Text(if (hasVoiceKey) "API keys and setup" else "Set up JARVIS")
+            }
+            Text(if (!hasVoiceKey) "Gemini key required · Scan PC QR or use your own key"
+                else if (credentialSource == "pc") "Voice key: From your PC" else "Voice key: Your Gemini key",
+                color = Color.Gray, fontSize = 12.sp)
 
             // Ambient Halo Orb
             HaloOrb(
@@ -270,7 +279,7 @@ fun JarvisMobileScreen(
 
                     StatusRow(
                         title = "Cloud Memory Sync",
-                        value = "jarvis-os-508612 (Firestore/GCS)",
+                        value = if (isPaired) "Paired PC" else "Optional · PC not paired",
                         active = isPaired
                     )
                 }
@@ -280,7 +289,7 @@ fun JarvisMobileScreen(
 
             // Actions Section
             Button(
-                onClick = { onStartDaemon() },
+                onClick = { if (hasVoiceKey) onStartDaemon() else showSetupDialog = true },
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(52.dp),
@@ -386,6 +395,30 @@ fun JarvisMobileScreen(
         }
     }
 
+    if (showSetupDialog) {
+        ApiKeySetupDialog(onDismiss = { showSetupDialog = false }, onScanPc = {
+            showSetupDialog = false
+            showPairDialog = true
+        }, onSave = { gemini, optional ->
+            try {
+                ApiCredentials.savePersonal(context, gemini, optional)
+                androidx.work.WorkManager.getInstance(context).cancelUniqueWork("jarvis_periodic_memory_sync")
+                onStopDaemon()
+                isPaired = false
+                pairingInfo = null
+                hasVoiceKey = true
+                credentialSource = "personal"
+                showSetupDialog = false
+                Toast.makeText(context, "Keys saved. Tap Enable Hey Jarvis to begin.", Toast.LENGTH_LONG).show()
+                null
+            } catch (_: IllegalArgumentException) {
+                "Paste a complete Gemini key. Optional keys may be left blank."
+            } catch (_: Exception) {
+                "Could not save keys securely. Please try again."
+            }
+        })
+    }
+
     // Pairing Dialog
     if (showPairDialog) {
         AlertDialog(
@@ -417,7 +450,8 @@ fun JarvisMobileScreen(
                         value = pairInputText,
                         onValueChange = { pairInputText = it },
                         modifier = Modifier.fillMaxWidth(),
-                        placeholder = { Text("{\"v\":1,\"pid\":\"jarvis-os-508612\"...}") },
+                        placeholder = { Text("Paste your PC pairing payload") },
+                        visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
                         maxLines = 4
                     )
                 }
@@ -428,6 +462,8 @@ fun JarvisMobileScreen(
                     if (payload != null) {
                         isPaired = true
                         pairingInfo = payload
+                        hasVoiceKey = ApiCredentials.gemini(context).isNotBlank()
+                        credentialSource = ApiCredentials.source(context)
                         showPairDialog = false
                         Toast.makeText(context, "Successfully paired with ${payload.deviceId}!", Toast.LENGTH_SHORT).show()
                     } else {
@@ -453,6 +489,8 @@ fun JarvisMobileScreen(
                 QrPairingScanner.savePairing(context, payload)
                 isPaired = true
                 pairingInfo = payload
+                hasVoiceKey = ApiCredentials.gemini(context).isNotBlank()
+                credentialSource = ApiCredentials.source(context)
                 showQrScanner = false
                 Toast.makeText(context, "Successfully paired with ${payload.deviceId}!", Toast.LENGTH_SHORT).show()
             }

@@ -298,14 +298,13 @@ class JarvisVoiceService : Service() {
 
     private fun startVoicePipeline() {
         if (enabled) return
-        CloudMemorySyncWorker.schedule(this)
+        if (com.jarvis.os.sync.QrPairingScanner.isPaired(this)) CloudMemorySyncWorker.schedule(this)
         // Connect to Gemini Live if not already connected
-        val apiKey = getSharedPreferences("jarvis_prefs", Context.MODE_PRIVATE)
-            .getString("gemini_api_key", "") ?: ""
+        val apiKey = com.jarvis.os.sync.ApiCredentials.gemini(this)
 
         if (apiKey.isBlank()) {
             updateState(ConversationState.ERROR)
-            updateNotification("Voice setup missing. Pair desktop with a Gemini key.")
+            updateNotification("Add your Gemini key or scan your PC JARVIS QR code.")
             return
         }
         enabled = true

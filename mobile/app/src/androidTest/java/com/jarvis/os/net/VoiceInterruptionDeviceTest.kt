@@ -21,7 +21,7 @@ class VoiceInterruptionDeviceTest {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
         instrumentation.startActivitySync(Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-        val key = context.getSharedPreferences("jarvis_prefs", Context.MODE_PRIVATE).getString("gemini_api_key", "").orEmpty()
+        val key = com.jarvis.os.sync.ApiCredentials.gemini(context)
         val client = GeminiLiveClient()
         val speaker = AudioPlaybackEngine()
         val speaking = CountDownLatch(1)
