@@ -202,11 +202,21 @@ class VadDetector(
         }
 
         /**
-         * Compute RMS amplitude from raw byte array.
+         * Compute RMS amplitude from raw little-endian 16-bit PCM byte array without heap allocations.
          */
         fun calculateRms(bytes: ByteArray): Double {
-            if (bytes.isEmpty()) return 0.0
-            return calculateRms(toPcmShorts(bytes))
+            if (bytes.size < 2) return 0.0
+            var sumSquares = 0.0
+            val sampleCount = bytes.size / 2
+            var i = 0
+            while (i < bytes.size - 1) {
+                val low = bytes[i].toInt() and 0xFF
+                val high = bytes[i + 1].toInt()
+                val sample = (high shl 8) or low
+                sumSquares += sample.toDouble() * sample.toDouble()
+                i += 2
+            }
+            return sqrt(sumSquares / sampleCount)
         }
 
         /**

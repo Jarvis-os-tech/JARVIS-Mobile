@@ -91,6 +91,15 @@ class AudioPlaybackEngine(private val sampleRate: Int = SAMPLE_RATE_HZ) {
                     if (!drained && !hasPendingAudioLocked()) { drained = true; true } else false
                 }
                 if (notify) onPlaybackDrained?.invoke()
+
+                // If playback is completely drained and no chunks are queued, terminate worker to prevent 200 Hz CPU wakeups in standby
+                val shouldExit = synchronized(lock) {
+                    if (drained && queue.isEmpty()) {
+                        worker = null
+                        true
+                    } else false
+                }
+                if (shouldExit) break
             }
         } catch (_: InterruptedException) {
             // release() terminates the worker.

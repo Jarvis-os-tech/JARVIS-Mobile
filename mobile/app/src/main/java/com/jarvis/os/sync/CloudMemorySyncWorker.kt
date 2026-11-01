@@ -25,8 +25,8 @@ class CloudMemorySyncWorker(
 ) : CoroutineWorker(appContext, workerParams) {
 
     private val httpClient = OkHttpClient.Builder()
-        .connectTimeout(15, TimeUnit.SECONDS)
-        .readTimeout(15, TimeUnit.SECONDS)
+        .connectTimeout(3, TimeUnit.SECONDS)
+        .readTimeout(10, TimeUnit.SECONDS)
         .build()
 
     override suspend fun doWork(): Result {
@@ -46,12 +46,11 @@ class CloudMemorySyncWorker(
         }
 
         val endpointsToTry = mutableListOf<String>()
+        // Prioritize local loopback tunnel first for instantaneous zero-latency delivery
+        endpointsToTry.add("http://127.0.0.1:8766/v1/memory")
         val execEp = pairing.executionEndpoint
-        if (execEp.isNotBlank()) {
+        if (execEp.isNotBlank() && !endpointsToTry.contains(execEp.trimEnd('/') + "/v1/memory")) {
             endpointsToTry.add(execEp.trimEnd('/') + "/v1/memory")
-        }
-        if (!endpointsToTry.contains("http://127.0.0.1:8766/v1/memory")) {
-            endpointsToTry.add("http://127.0.0.1:8766/v1/memory")
         }
         if (pairing.endpoint.isNotBlank()) {
             endpointsToTry.add(pairing.endpoint)

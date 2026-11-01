@@ -18,7 +18,8 @@ import java.util.concurrent.atomic.AtomicBoolean
  */
 class AudioCaptureEngine(
     private val sampleRate: Int = SAMPLE_RATE_HZ,
-    private val chunkByteSize: Int = CHUNK_SIZE_BYTES
+    private val chunkByteSize: Int = CHUNK_SIZE_BYTES,
+    private val audioSource: Int = MediaRecorder.AudioSource.MIC
 ) {
     private val isRecording = AtomicBoolean(false)
     private var captureJob: Job? = null
@@ -46,7 +47,7 @@ class AudioCaptureEngine(
 
         try {
             val record = AudioRecord(
-                MediaRecorder.AudioSource.VOICE_COMMUNICATION,
+                audioSource,
                 sampleRate,
                 channelConfig,
                 audioFormat,
@@ -59,7 +60,7 @@ class AudioCaptureEngine(
                 return false
             }
 
-            if (AcousticEchoCanceler.isAvailable()) {
+            if (audioSource == MediaRecorder.AudioSource.VOICE_COMMUNICATION && AcousticEchoCanceler.isAvailable()) {
                 try {
                     echoCanceler = AcousticEchoCanceler.create(record.audioSessionId)?.apply { enabled = true }
                 } catch (error: Exception) {
@@ -72,7 +73,7 @@ class AudioCaptureEngine(
 
             captureJob = scope.launch(Dispatchers.IO) {
                 val buffer = ByteArray(chunkByteSize)
-                Log.i(TAG, "AudioCapture loop started: $sampleRate Hz, $chunkByteSize bytes/frame")
+                Log.i(TAG, "AudioCapture loop started: $sampleRate Hz, $chunkByteSize bytes/frame, source=$audioSource")
 
                 try {
                     while (isActive && isRecording.get()) {
@@ -81,16 +82,17 @@ class AudioCaptureEngine(
                             val read = record.read(
                                 buffer,
                                 bytesRead,
-                                chunkByteSize - bytesRead
+                                chunkByteSize - bytesRead,
+                                AudioRecord.READ_BLOCKING
                             )
                             if (read > 0) {
                                 bytesRead += read
-                            } else if (read == AudioRecord.ERROR_INVALID_OPERATION ||
-                                read == AudioRecord.ERROR_BAD_VALUE ||
-                                read == AudioRecord.ERROR_DEAD_OBJECT
-                            ) {
+                            } else if (read < 0) {
                                 Log.e(TAG, "AudioRecord read error: $read")
+                                kotlinx.coroutines.delay(100)
                                 break
+                            } else {
+                                kotlinx.coroutines.delay(10)
                             }
                         }
 

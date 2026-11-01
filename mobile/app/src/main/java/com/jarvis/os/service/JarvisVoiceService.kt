@@ -106,7 +106,15 @@ class JarvisVoiceService : Service() {
         when (action) {
             ACTION_START -> {
                 try {
-                    startForeground(NOTIFICATION_ID, buildNotification("Starting Hey Jarvis"))
+                    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+                        startForeground(
+                            NOTIFICATION_ID,
+                            buildNotification("Starting Hey Jarvis"),
+                            android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+                        )
+                    } else {
+                        startForeground(NOTIFICATION_ID, buildNotification("Starting Hey Jarvis"))
+                    }
                 } catch (error: SecurityException) {
                     Log.w(TAG, "Open JARVIS to enable microphone standby", error)
                     stopSelf()

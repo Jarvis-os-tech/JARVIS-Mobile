@@ -13,6 +13,14 @@ class WakeWordDetector(private val context: Context) {
     private var goodbyeRecognizer: Recognizer? = null
     private var wakeCommand: String? = null
 
+    // Standby low-power gating state
+    private val preRollBuffers = Array(PRE_ROLL_CHUNKS) { ByteArray(0) }
+    private var preRollIndex = 0
+    private var preRollCount = 0
+    private var isVoiceActive = false
+    private var hangoverRemaining = 0
+    private var estimatedNoiseFloor = 100.0
+
     @Synchronized
     fun prepare() {
         if (recognizer != null) return
@@ -40,6 +48,70 @@ class WakeWordDetector(private val context: Context) {
 
     @Synchronized
     fun process(pcm: ByteArray): Boolean {
+        if (recognizer == null) return false
+        val energy = VadDetector.calculateRms(pcm)
+        val effectiveThreshold = maxOf(BASE_ENERGY_THRESHOLD, estimatedNoiseFloor * 2.0)
+
+        if (!isVoiceActive && energy < effectiveThreshold * 0.5) {
+            estimatedNoiseFloor = 0.95 * estimatedNoiseFloor + 0.05 * energy
+        }
+
+        val hasEnergy = energy >= effectiveThreshold
+
+        if (hasEnergy) {
+            if (!isVoiceActive) {
+                isVoiceActive = true
+                val start = (preRollIndex - preRollCount + PRE_ROLL_CHUNKS) % PRE_ROLL_CHUNKS
+                for (i in 0 until preRollCount) {
+                    val idx = (start + i) % PRE_ROLL_CHUNKS
+                    val buf = preRollBuffers[idx]
+                    if (buf.isNotEmpty()) {
+                        if (processDecoder(buf)) {
+                            resetGating()
+                            return true
+                        }
+                    }
+                }
+                preRollCount = 0
+            }
+            hangoverRemaining = HANGOVER_FRAMES
+            val detected = processDecoder(pcm)
+            if (detected) {
+                resetGating()
+                return true
+            }
+            return false
+        } else if (isVoiceActive) {
+            hangoverRemaining--
+            val detected = processDecoder(pcm)
+            if (detected) {
+                resetGating()
+                return true
+            }
+            if (hangoverRemaining <= 0) {
+                isVoiceActive = false
+                recognizer?.reset()
+                preRollCount = 0
+            }
+            return false
+        } else {
+            // Standby silence: buffer into pre-roll ring without running heavy Vosk decoding
+            preRollBuffers[preRollIndex] = pcm.copyOf()
+            preRollIndex = (preRollIndex + 1) % PRE_ROLL_CHUNKS
+            if (preRollCount < PRE_ROLL_CHUNKS) preRollCount++
+            return false
+        }
+    }
+
+    private fun resetGating() {
+        isVoiceActive = false
+        hangoverRemaining = 0
+        preRollCount = 0
+    }
+
+    /** Direct un-gated decoder pass for speech frames. */
+    @Synchronized
+    fun processDecoder(pcm: ByteArray): Boolean {
         val decoder = recognizer ?: return false
         // Partial hypotheses can briefly invent "hey" before correcting to "Jarvis".
         if (!decoder.acceptWaveForm(pcm, pcm.size)) return false
@@ -64,7 +136,11 @@ class WakeWordDetector(private val context: Context) {
     }
 
     @Synchronized
-    fun reset() { recognizer?.reset();wakeCommand = null }
+    fun reset() {
+        recognizer?.reset()
+        wakeCommand = null
+        resetGating()
+    }
 
     @Synchronized
     fun consumeWakeCommand(): String? = wakeCommand.also { wakeCommand = null }
@@ -99,6 +175,12 @@ class WakeWordDetector(private val context: Context) {
             check(destination.mkdirs() || destination.isDirectory)
             children.forEach { copyAssets("$path/$it", File(destination, it)) }
         }
+    }
+
+    companion object {
+        const val BASE_ENERGY_THRESHOLD = 300.0
+        const val PRE_ROLL_CHUNKS = 4 // ~80ms pre-speech audio buffer
+        const val HANGOVER_FRAMES = 50 // ~1.0 second of trailing silence
     }
 }
 

@@ -355,4 +355,16 @@ class AudioPcmTest {
         assertEquals(640, collectedFrames[1].size)
         assertEquals(20, accumulator.size)
     }
+
+    @Test
+    fun testZeroAllocationRmsEquivalence() {
+        val random = java.util.Random(42)
+        for (trial in 0 until 50) {
+            val samples = ShortArray(320) { random.nextInt().toShort() }
+            val bytes = VadDetector.fromPcmShorts(samples)
+            val rmsShorts = VadDetector.calculateRms(samples)
+            val rmsBytes = VadDetector.calculateRms(bytes)
+            assertEquals("RMS mismatch in trial $trial", rmsShorts, rmsBytes, 1e-6)
+        }
+    }
 }
