@@ -50,6 +50,20 @@ class DeviceToolClient(private val context: Context) {
 
     fun pairedUpdateRequest(path: String): Request.Builder = request(path)
 
+    fun confirmPairing(session: String): Boolean {
+        require(Regex("[a-f0-9]{64}").matches(session))
+        val body = JSONObject().put("session", session).toString().toRequestBody("application/json".toMediaType())
+        val client = http.newBuilder().readTimeout(5, TimeUnit.SECONDS).followRedirects(false).build()
+        for (endpoint in listOf(configuredEndpoint, "http://127.0.0.1:8766").distinct()) {
+            try {
+                client.newCall(request("/v1/pairing/confirm", endpoint).post(body).build()).execute().use {
+                    if (it.isSuccessful) return true
+                }
+            } catch (_: Exception) { }
+        }
+        return false
+    }
+
     fun declarations(): JSONArray {
         val declarations = JSONArray()
         declarations.put(JSONObject("""{"name":"phone_status","description":"Read this Android phone's battery and device information.","parameters":{"type":"OBJECT","properties":{}}}"""))

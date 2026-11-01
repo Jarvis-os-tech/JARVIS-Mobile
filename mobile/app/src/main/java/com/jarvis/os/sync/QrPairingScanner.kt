@@ -48,6 +48,7 @@ object QrPairingScanner {
             putString(KEY_GCS_BUCKET, payload.gcsBucket)
             putString(KEY_ENDPOINT, payload.endpoint)
             putString("execution_endpoint", payload.executionEndpoint)
+            putString("pairing_session", payload.pairingSession)
             payload.geminiApiKey?.let { putString(KEY_GEMINI_KEY, it) }
             check(commit()) { "Could not save pairing securely" }
         }
@@ -58,6 +59,7 @@ object QrPairingScanner {
                 .edit().remove("gemini_api_key").commit()
         }
 
+        PairingConfirmationWorker.enqueue(context, payload.pairingSession)
         Log.i(TAG, "Device pairing established with ${payload.deviceId} on project ${payload.projectId}")
     }
 
@@ -84,6 +86,7 @@ object QrPairingScanner {
             gcsBucket = gcsBucket,
             endpoint = endpoint,
             geminiApiKey = geminiKey,
+            pairingSession = prefs.getString("pairing_session", "").orEmpty(),
             executionEndpoint = prefs.getString("execution_endpoint", "http://127.0.0.1:8766") ?: "http://127.0.0.1:8766"
         )
     }
@@ -91,7 +94,7 @@ object QrPairingScanner {
     fun clearPairing(context: Context) {
         getSecurePrefs(context).edit().apply {
             listOf(KEY_IS_PAIRED, KEY_PROJECT_ID, KEY_DEVICE_ID, KEY_AUTH_TOKEN,
-                KEY_GCS_BUCKET, KEY_ENDPOINT, "execution_endpoint").forEach { remove(it) }
+                KEY_GCS_BUCKET, KEY_ENDPOINT, "execution_endpoint", "pairing_session").forEach { remove(it) }
         }.commit()
         Log.i(TAG, "Device pairing credentials cleared")
     }

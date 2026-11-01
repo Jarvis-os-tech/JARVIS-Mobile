@@ -11,6 +11,10 @@ For PC setup, tell desktop JARVIS **“Open the phone pairing QR code.”** Scan
 the phone app. The QR shares the PC's configured Gemini key and device pairing
 credential; treat it as private. Other PC integrations continue using their
 existing keys through the shared PC executor. Only scan a QR from your own PC.
+The desktop QR appears in a compact corner window like picture-in-picture.
+With mobile **1.2.1 or newer**, saving a new QR pairing sends an authenticated
+confirmation for that exact window, which then closes and deletes its QR image.
+An unrelated connection does not close it. The window expires after five minutes.
 
 Without PC JARVIS, paste your own **Gemini API key (required)**. Voice and native
 phone controls work without desktop pairing. OpenAI, Anthropic, and Groq fields
@@ -30,6 +34,10 @@ Tap **Update JARVIS** with Wi-Fi or mobile data enabled. The online channel work
 without USB, PC pairing, a shared network, or a running PC. Android asks you to
 approve installation. The first version with this online updater is **1.1.2**;
 older installations need that APK installed once before using online updates.
+There are no automatic update checks, downloads, or installations. Publishing a
+release makes it available; the phone changes only after the user presses the
+button and approves the Android installer. Development builds must not be pushed
+to a connected phone without the user's explicit installation request.
 
 Downloads use HTTPS, bounded sizes, SHA-256 verification, the JARVIS package name,
 an increasing version code, and the installed app's signing certificate. Desktop

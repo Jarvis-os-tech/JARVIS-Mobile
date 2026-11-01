@@ -95,4 +95,13 @@ class SyncPayloadTest {
         assertTrue(bundleJson.contains("\"authToken\":\"secret-token\""))
         assertTrue(bundleJson.contains("Good morning, sir."))
     }
+    @Test
+    fun pairingWindowSessionIsOptionalAndPreserved() {
+        val session = "a".repeat(64)
+        val base = org.json.JSONObject().put("v", 1).put("pid", "test-project")
+            .put("dev", "test-pc").put("tok", "test-token")
+        assertEquals("", SyncPayloads.parsePairingPayload(base.toString())!!.pairingSession)
+        base.put("pair_session", session)
+        assertEquals(session, SyncPayloads.parsePairingPayload(base.toString())!!.pairingSession)
+    }
 }

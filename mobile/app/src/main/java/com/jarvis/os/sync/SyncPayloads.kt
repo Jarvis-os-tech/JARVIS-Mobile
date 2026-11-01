@@ -11,7 +11,8 @@ data class PairingPayload(
     val gcsBucket: String,
     val endpoint: String,
     val geminiApiKey: String? = null,
-    val executionEndpoint: String = "http://127.0.0.1:8766"
+    val executionEndpoint: String = "http://127.0.0.1:8766",
+    val pairingSession: String = ""
 )
 
 data class MemoryDeltaRecord(
@@ -29,6 +30,7 @@ object SyncPayloads {
             val root = JSONObject(jsonString)
             PairingPayload(
                 version = root.optInt("v", 1),
+                pairingSession = root.optString("pair_session", ""),
                 projectId = root.getString("pid"),
                 deviceId = root.getString("dev"),
                 authToken = root.getString("tok"),
