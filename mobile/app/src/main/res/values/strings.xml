@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">JARVIS</string>
+    <string name="voice_navigation_name">JARVIS voice navigation</string>
+    <string name="voice_navigation_description">Lets JARVIS follow your voice commands to read the current app screen, tap buttons, scroll, type and navigate this phone. Password fields are hidden. Use this only for your own requested phone actions.</string>
+</resources>
