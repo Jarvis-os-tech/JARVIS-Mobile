@@ -66,7 +66,6 @@ class JarvisVoiceService : Service() {
     val isWakeListening: Boolean
         get() = enabled && captureEngine.isCapturing && !activeSession && !closingForGoodbye
 
-    private var idleTimeoutJob: Job? = null
     private val wakeDetector by lazy { WakeWordDetector(this) }
     private var startupJob: Job? = null
     @Volatile private var enabled = false
@@ -105,6 +104,7 @@ class JarvisVoiceService : Service() {
 
         when (action) {
             ACTION_START -> {
+                isRunning = true
                 try {
                     if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
                         startForeground(
@@ -117,6 +117,7 @@ class JarvisVoiceService : Service() {
                     }
                 } catch (error: SecurityException) {
                     Log.w(TAG, "Open JARVIS to enable microphone standby", error)
+                    isRunning = false
                     stopSelf()
                     return START_NOT_STICKY
                 }
@@ -174,7 +175,6 @@ class JarvisVoiceService : Service() {
                     val command = commandAfterWake
                     commandAfterWake = null
                     geminiClient.sendText(command ?: "The user just said Hey Jarvis. Say a short greeting and ask how you can help. Do not say the wake phrase yourself.")
-                    scheduleStandby(20000)
                 } else if (!ready && activeSession) {
                     enterStandby()
                     updateNotification("Connection lost. Say Hey Jarvis to retry.")
@@ -203,7 +203,6 @@ class JarvisVoiceService : Service() {
 
             serviceScope.launch {
                 if (activeSession && !suppressOldResponse && playbackEngine.hasPendingAudio) {
-                    idleTimeoutJob?.cancel()
                     updateState(ConversationState.SPEAKING)
                 }
             }
@@ -222,7 +221,6 @@ class JarvisVoiceService : Service() {
                 assistantTranscriptBuilder.setLength(0)
             }
             if (userText.isNotEmpty() || assistantText.isNotEmpty()) {
-                Log.i(TAG, "Syncing conversational turn to memory - user: ${userText.take(50)}, assistant: ${assistantText.take(50)}")
                 if (userText.isNotEmpty()) {
                     CloudMemorySyncWorker.enqueueTurn(this@JarvisVoiceService, "user", userText)
                 }
@@ -252,7 +250,6 @@ class JarvisVoiceService : Service() {
             serviceScope.launch {
                 if (activeSession) {
                     updateState(ConversationState.LISTENING)
-                    scheduleStandby(30000)
                 }
             }
         }
@@ -275,7 +272,6 @@ class JarvisVoiceService : Service() {
                     if (!toolCalls.add(call.id)) return@launch
                     val identity = sessionIdentity
                     pendingToolCalls++
-                    idleTimeoutJob?.cancel()
                     updateState(ConversationState.THINKING)
                     try {
                         if (call.name == "phone_turn_off") {
@@ -297,7 +293,6 @@ class JarvisVoiceService : Service() {
                         }
                     } finally {
                         pendingToolCalls--
-                        if (activeSession && sessionIdentity == identity) scheduleStandby(30000)
                     }
                 }
             }
@@ -351,7 +346,6 @@ class JarvisVoiceService : Service() {
                     }
                     serviceScope.launch {
                         if (activeSession && _currentState.value != ConversationState.LISTENING) {
-                            scheduleStandby(30000)
                             updateState(ConversationState.LISTENING)
                         }
                     }
@@ -414,12 +408,20 @@ class JarvisVoiceService : Service() {
         updateState(ConversationState.THINKING)
         val identity = sessionIdentity
         serviceScope.launch {
-            val tools = withContext(Dispatchers.IO) { deviceTools.declarations() }
+            val setup = withContext(Dispatchers.IO) {
+                try {
+                    CloudMemorySyncWorker.synchronize(this@JarvisVoiceService, maxBatches = 1)
+                    CloudMemorySyncWorker.syncNow(this@JarvisVoiceService)
+                }
+                catch (error: Exception) { Log.w(TAG, "Shared memory unavailable; using saved phone history", error) }
+                val memoryContext = com.jarvis.os.sync.ContinuousMemory(this@JarvisVoiceService).use { it.promptContext() }
+                deviceTools.declarations() to memoryContext
+            }
+            val tools = setup.first
             if (activeSession && sessionIdentity == identity) {
-                geminiClient.connect(apiKey, extraTools = tools, systemPrompt = DeviceToolClient.SYSTEM_PROMPT)
+                geminiClient.connect(apiKey, extraTools = tools, systemPrompt = DeviceToolClient.SYSTEM_PROMPT + setup.second)
             }
         }
-        scheduleStandby(30000)
     }
 
     private fun enterStandby() {
@@ -443,7 +445,6 @@ class JarvisVoiceService : Service() {
         activeSession = false
         suppressOldResponse = false
         modelTurnFinished = false
-        idleTimeoutJob?.cancel()
         geminiClient.disconnect()
         playbackEngine.cancel()
         fillerMixer.cancel()
@@ -453,19 +454,10 @@ class JarvisVoiceService : Service() {
         Log.i(TAG, "Standby: local wake listener; cloud audio disabled")
     }
 
-    private fun scheduleStandby(delayMs: Long) {
-        idleTimeoutJob?.cancel()
-        idleTimeoutJob = serviceScope.launch {
-            delay(delayMs)
-            if (pendingToolCalls == 0) enterStandby()
-        }
-    }
-
     private fun finishReplyWhenDrained() {
         serviceScope.launch {
             if (activeSession && pendingToolCalls == 0 && modelTurnFinished && !suppressOldResponse && !playbackEngine.hasPendingAudio) {
                 updateState(ConversationState.LISTENING)
-                scheduleStandby(15000)
             }
         }
     }
@@ -491,7 +483,6 @@ class JarvisVoiceService : Service() {
         enabled = false
         activeSession = false
         startupJob?.cancel()
-        idleTimeoutJob?.cancel()
         captureEngine.stopCapture()
         playbackEngine.cancel()
         playbackEngine.release()
@@ -503,6 +494,7 @@ class JarvisVoiceService : Service() {
 
     fun turnOffAssistant() {
         Log.i(TAG, "Assistant turned off: microphone and wake detection stopped")
+        isRunning = false
         stopVoicePipeline()
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
@@ -513,7 +505,6 @@ class JarvisVoiceService : Service() {
         closingForGoodbye = true
         activeSession = false
         suppressOldResponse = true
-        idleTimeoutJob?.cancel()
         geminiClient.disconnect()
         synchronized(responseLock) {
             playbackEngine.cancel()
@@ -586,6 +577,7 @@ class JarvisVoiceService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         Log.i(TAG, "JarvisVoiceService onDestroy")
+        isRunning = false
         stopVoicePipeline()
         goodbyeTimeout?.cancel()
         wakeDetector.close()
@@ -601,5 +593,8 @@ class JarvisVoiceService : Service() {
         const val ACTION_START = "com.jarvis.os.action.START"
         const val ACTION_STOP = "com.jarvis.os.action.STOP"
         const val ACTION_TOGGLE = "com.jarvis.os.action.TOGGLE"
+
+        @Volatile
+        var isRunning: Boolean = false
     }
 }
