@@ -12,8 +12,8 @@ android {
         applicationId = "com.jarvis.os"
         minSdk = 26
         targetSdk = 34
-        versionCode = 10
-        versionName = "1.3.1"
+        versionCode = 11
+        versionName = "1.3.2"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
@@ -44,6 +44,8 @@ android {
     kotlinOptions {
         jvmTarget = "17"
     }
+
+    testOptions { unitTests.isReturnDefaultValues = true }
 
     buildFeatures {
         compose = true

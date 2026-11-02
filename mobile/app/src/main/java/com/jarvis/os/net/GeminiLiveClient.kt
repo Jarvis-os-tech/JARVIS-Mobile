@@ -18,13 +18,21 @@ class GeminiLiveClient(
         .readTimeout(0, TimeUnit.MILLISECONDS)
         .pingInterval(20, TimeUnit.SECONDS)
         .retryOnConnectionFailure(true)
-        .build()
+        .build(),
+    private val socketFactory: WebSocket.Factory = client,
+    private val setupTimeoutMs: Long = 15000
 ) {
     private var webSocket: WebSocket? = null
     private val isConnected = AtomicBoolean(false)
     private val isConnecting = AtomicBoolean(false)
     private var userDisconnected = false
     private var activeModelIndex = 0
+    private var generation = 0L
+    private var terminalHandled = false
+    private var setupTimeout: java.util.concurrent.ScheduledFuture<*>? = null
+
+    @Synchronized private fun isCurrent(attempt: Long): Boolean =
+        attempt == generation && !userDisconnected && !terminalHandled
 
     private var currentApiKey: String = ""
     private var currentVoice: String = "Aoede"
@@ -70,7 +78,11 @@ class GeminiLiveClient(
         startSessionWebSocket()
     }
 
+    @Synchronized
     private fun startSessionWebSocket() {
+        val attempt = ++generation
+        terminalHandled = false
+        setupTimeout?.cancel(false)
         val targetModel = LiveSessionModels.SUPPORTED_LIVE_MODELS.getOrElse(activeModelIndex) {
             LiveSessionModels.DEFAULT_MODEL
         }
@@ -80,8 +92,9 @@ class GeminiLiveClient(
         isConnecting.set(true)
         Log.i(TAG, "Initiating Gemini Live WebSocket with model '$targetModel' (candidate ${activeModelIndex + 1}/${LiveSessionModels.SUPPORTED_LIVE_MODELS.size})")
 
-        webSocket = client.newWebSocket(request, object : WebSocketListener() {
+        webSocket = socketFactory.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
+                if (!isCurrent(attempt)) { webSocket.cancel(); return }
                 Log.i(TAG, "Gemini Live WebSocket opened successfully. Sending setup packet for model: $targetModel")
 
                 val setupJson = LiveSessionModels.buildSetupJson(
@@ -95,11 +108,16 @@ class GeminiLiveClient(
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
+                if (!isCurrent(attempt)) return
                 try {
                     for (msg in LiveSessionModels.parseServerMessages(text)) when (msg) {
                         is ServerMessage.SetupComplete -> {
-                            isConnecting.set(false)
-                            isConnected.set(true)
+                            synchronized(this@GeminiLiveClient) {
+                                if (!isCurrent(attempt)) return
+                                setupTimeout?.cancel(false)
+                                isConnecting.set(false)
+                                isConnected.set(true)
+                            }
                             Log.i(TAG, "Gemini Live session ready using model: $targetModel")
                             onConnectionStateChanged?.invoke(true)
                         }
@@ -147,42 +165,49 @@ class GeminiLiveClient(
 
             override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
                 Log.i(TAG, "Gemini Live WebSocket closing: $code / $reason")
-                handleSocketClose(code, reason)
+                webSocket.close(code, null)
+                handleSocketClose(attempt, code, reason)
             }
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
                 Log.i(TAG, "Gemini Live WebSocket closed: $code / $reason")
-                handleSocketClose(code, reason)
+                handleSocketClose(attempt, code, reason)
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                 val code = response?.code ?: 0
                 val body = try { response?.body?.string() } catch (_: Exception) { null }
-                Log.e(TAG, "Gemini Live WebSocket failure: ${t.message}, httpCode=$code, responseBody=$body", t)
-                handleSocketClose(code, body ?: t.message ?: "Socket Failure")
+                // Exception messages can include the URL's API key; never log them.
+                Log.e(TAG, "Gemini Live connection failed: httpCode=$code, type=${t.javaClass.simpleName}")
+                handleSocketClose(attempt, code, body ?: "Socket failure")
             }
         })
+        setupTimeout = timeoutExecutor.schedule({
+            synchronized(this) {
+                if (isCurrent(attempt) && isConnecting.get()) {
+                    handleSocketClose(attempt, 0, "Voice setup timed out")
+                }
+            }
+        }, setupTimeoutMs, TimeUnit.MILLISECONDS)
     }
 
     @Synchronized
-    private fun handleSocketClose(code: Int, reason: String) {
+    private fun handleSocketClose(attempt: Long, code: Int, reason: String) {
+        if (!isCurrent(attempt)) return
+        terminalHandled = true
+        setupTimeout?.cancel(false)
         val wasConnected = isConnected.getAndSet(false)
         val wasConnecting = isConnecting.getAndSet(false)
 
-        if (userDisconnected) {
-            onConnectionStateChanged?.invoke(false)
-            return
-        }
-
-        val isModelRejection = code == 1008 || reason.contains("not supported", ignoreCase = true) || reason.contains("not found", ignoreCase = true)
-        if (!wasConnected && (wasConnecting || isModelRejection) && activeModelIndex + 1 < LiveSessionModels.SUPPORTED_LIVE_MODELS.size) {
+        val oldSocket = webSocket
+        webSocket = null
+        oldSocket?.cancel()
+        val isModelRejection = (code == 1008 || code == 404) &&
+            (reason.contains("not supported", ignoreCase = true) || reason.contains("not found", ignoreCase = true))
+        if (!wasConnected && wasConnecting && isModelRejection &&
+            activeModelIndex + 1 < LiveSessionModels.SUPPORTED_LIVE_MODELS.size) {
             activeModelIndex++
-            val nextModel = LiveSessionModels.SUPPORTED_LIVE_MODELS[activeModelIndex]
-            Log.w(TAG, "Live model candidate failed ($code: $reason). Falling back automatically to $nextModel...")
-            try {
-                webSocket?.close(1000, "Fallback")
-                webSocket = null
-            } catch (_: Exception) {}
+            Log.w(TAG, "Live model unavailable; trying the next supported voice model")
             startSessionWebSocket()
             return
         }
@@ -228,6 +253,9 @@ class GeminiLiveClient(
     @Synchronized
     fun disconnect() {
         userDisconnected = true
+        generation++
+        terminalHandled = true
+        setupTimeout?.cancel(false)
         isConnecting.set(false)
         try {
             webSocket?.close(1000, "Normal Closure")
@@ -242,5 +270,8 @@ class GeminiLiveClient(
 
     companion object {
         private const val TAG = "GeminiLiveClient"
+        private val timeoutExecutor = java.util.concurrent.Executors.newSingleThreadScheduledExecutor { task ->
+            Thread(task, "jarvis-live-setup-timeout").apply { isDaemon = true }
+        }
     }
 }
