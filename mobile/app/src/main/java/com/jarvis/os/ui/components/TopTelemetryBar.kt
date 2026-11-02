@@ -40,7 +40,7 @@ import com.jarvis.os.ui.theme.TextWhite
 @Composable
 fun TopTelemetryBar(
     standbyActive: Boolean,
-    appVersion: String = "v1.2.3",
+    appVersion: String = "",
     modifier: Modifier = Modifier
 ) {
     val pulseTransition = rememberInfiniteTransition(label = "StatusPulse")

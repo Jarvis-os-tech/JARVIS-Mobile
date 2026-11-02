@@ -13,6 +13,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.HttpUrl.Companion.toHttpUrl
+import com.jarvis.os.sync.QrPairingScanner
 import java.io.IOException
 import org.json.JSONObject
 import java.io.File
@@ -32,8 +34,10 @@ class MobileUpdater(private val context: Context) {
 
     private fun source(): Source {
         try {
-            internet.newCall(Request.Builder().url(publicRelease).build()).execute().use { response ->
-                if (!response.isSuccessful) throw IOException("Online release unavailable")
+            val metadataClient = internet.newBuilder().callTimeout(12, TimeUnit.SECONDS).readTimeout(10, TimeUnit.SECONDS).build()
+            val fresh = publicRelease.toHttpUrl().newBuilder().addQueryParameter("check", System.currentTimeMillis().toString()).build()
+            metadataClient.newCall(Request.Builder().url(fresh).header("Cache-Control", "no-cache").build()).execute().use { response ->
+                if (!response.isSuccessful) throw IOException("Public update check failed (HTTP ${response.code})")
                 val body = response.body ?: throw IOException("Empty release")
                 val bytes = body.byteStream().use { it.readBytesLimited(65536) }
                 val release = JSONObject(String(bytes, Charsets.UTF_8))
@@ -41,14 +45,16 @@ class MobileUpdater(private val context: Context) {
                 require(url.startsWith("https://github.com/Jarvis-os-tech/JARVIS-Mobile/releases/download/")) {
                     "Invalid online update location"
                 }
-                return Source(release, internet, Request.Builder().url(url).build())
+                val freshApk = url.toHttpUrl().newBuilder().addQueryParameter("download", System.currentTimeMillis().toString()).build()
+                return Source(release, internet, Request.Builder().url(freshApk).build())
             }
-        } catch (_: IOException) {
-            // A local development release remains usable without internet.
+        } catch (error: IOException) {
+            if (!QrPairingScanner.isPaired(context)) throw error
+            // A paired local development release remains usable without internet.
             val bridge = DeviceToolClient(context)
             bridge.declarations()
             http.newCall(bridge.pairedUpdateRequest("/v1/mobile-release").get().build()).execute().use { response ->
-                check(response.isSuccessful) { "No update channel available. Check your internet connection." }
+                if (!response.isSuccessful) throw error
                 val body = response.body ?: error("Empty release")
                 val release = JSONObject(String(body.byteStream().use { it.readBytesLimited(65536) }, Charsets.UTF_8))
                 return Source(release, http, bridge.pairedUpdateRequest("/v1/mobile-release/apk").get().build())
@@ -69,6 +75,11 @@ class MobileUpdater(private val context: Context) {
     }
 
     suspend fun update(report: (String) -> Unit): String {
+        if (!updateLock.tryLock()) return "An update download is already running. Keep JARVIS open, then retry if needed."
+        try { return updateLocked(report) } finally { updateLock.unlock() }
+    }
+
+    private suspend fun updateLocked(report: (String) -> Unit): String {
         report("Checking for updates…")
         val apk = withContext(Dispatchers.IO) {
             val source = source()
@@ -85,27 +96,16 @@ class MobileUpdater(private val context: Context) {
             val directory = File(context.cacheDir, "updates").apply { mkdirs() }
             val target = File(directory, "jarvis-$version.apk")
             if (!target.exists() || target.length() != size || hash(target) != sha) {
-                val temporary = File(directory, "download.part")
-                try {
-                    source.client.newCall(source.apk).execute().use { response ->
-                        check(response.isSuccessful) { "Update download unavailable" }
-                        val body = response.body ?: error("Empty update")
-                        body.byteStream().use { source -> temporary.outputStream().use { destination ->
-                            val buffer = ByteArray(65536)
-                            var total = 0L
-                            while (true) {
-                                val count = source.read(buffer)
-                                if (count < 0) break
-                                total += count
-                                check(total <= size) { "Invalid update size" }
-                                destination.write(buffer, 0, count)
-                            }
-                        } }
-                    }
-                    require(temporary.length() == size && hash(temporary) == sha) { "Update verification failed" }
-                    require(temporary.renameTo(target))
-                } finally { temporary.delete() }
+                val temporary = File(directory, "download-$version.part")
+                UpdateDownload.fetch(source.client, source.apk, temporary, size, sha) { bytes ->
+                    val percent = bytes * 100 / size
+                    val message = "Downloading update… $percent% (${String.format(java.util.Locale.US, "%.1f", bytes / 1048576.0)} / ${String.format(java.util.Locale.US, "%.1f", size / 1048576.0)} MB)"
+                    withContext(Dispatchers.Main) { report(message) }
+                }
+                if (target.exists()) check(target.delete()) { "Cannot replace the old update file" }
+                check(temporary.renameTo(target)) { "Cannot save the verified update" }
             }
+            withContext(Dispatchers.Main) { report("Verifying update…") }
             verify(target, version)
             target
         } ?: return "JARVIS is up to date."
@@ -137,12 +137,6 @@ class MobileUpdater(private val context: Context) {
     }
 
     private fun appVersion(info: PackageInfo): Long = if (Build.VERSION.SDK_INT >= 28) info.longVersionCode else info.versionCode.toLong()
-    private fun hash(file: File): String {
-        val digest = MessageDigest.getInstance("SHA-256")
-        file.inputStream().use { stream ->
-            val buffer = ByteArray(65536)
-            while (true) { val count = stream.read(buffer);if (count < 0) break;digest.update(buffer, 0, count) }
-        }
-        return digest.digest().joinToString("") { "%02x".format(it) }
-    }
+    private fun hash(file: File): String = UpdateDownload.hash(file)
+    companion object { private val updateLock = kotlinx.coroutines.sync.Mutex() }
 }

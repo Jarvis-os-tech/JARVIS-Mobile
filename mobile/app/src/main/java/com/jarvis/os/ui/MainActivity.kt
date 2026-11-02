@@ -259,7 +259,7 @@ fun JarvisMobileScreen(
         ) {
             TopTelemetryBar(
                 standbyActive = standbyActive,
-                appVersion = "v1.3.0"
+                appVersion = installedVersionLabel(context)
             )
 
             Box(
