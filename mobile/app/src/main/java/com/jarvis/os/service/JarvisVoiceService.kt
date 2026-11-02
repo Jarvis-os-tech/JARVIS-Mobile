@@ -457,12 +457,16 @@ class JarvisVoiceService : Service() {
         val identity = sessionIdentity
         serviceScope.launch {
             val setup = withContext(Dispatchers.IO) {
-                try {
-                    CloudMemorySyncWorker.synchronize(this@JarvisVoiceService, maxBatches = 1)
-                    CloudMemorySyncWorker.syncNow(this@JarvisVoiceService)
+                if (com.jarvis.os.sync.QrPairingScanner.isPaired(this@JarvisVoiceService)) {
+                    try { CloudMemorySyncWorker.syncNow(this@JarvisVoiceService) }
+                    catch (error: Exception) { Log.w(TAG, "Background memory sync schedule notice", error) }
                 }
-                catch (error: Exception) { Log.w(TAG, "Shared memory unavailable; using saved phone history", error) }
-                val memoryContext = com.jarvis.os.sync.ContinuousMemory(this@JarvisVoiceService).use { it.promptContext() }
+                val memoryContext = try {
+                    com.jarvis.os.sync.ContinuousMemory(this@JarvisVoiceService).use { it.promptContext() }
+                } catch (error: Exception) {
+                    Log.w(TAG, "Local memory read fallback", error)
+                    ""
+                }
                 deviceTools.declarations() to memoryContext
             }
             val tools = setup.first

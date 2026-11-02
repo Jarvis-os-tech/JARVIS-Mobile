@@ -122,17 +122,24 @@ class WakeWordDetector(private val context: Context) {
         var detected = false
         var jarvisWordIndex = -1
 
-        if (words != null && words.length() >= 2) {
-            for (i in 1 until words.length()) {
+        if (words != null && words.length() >= 1) {
+            for (i in 0 until words.length()) {
                 val w = words.getJSONObject(i)
                 val word = w.optString("word", "").lowercase()
                 val conf = w.optDouble("conf", 0.0)
 
-                if (word == "jarvis" && conf >= 0.55) {
-                    val prev = words.getJSONObject(i - 1)
-                    val prevWord = prev.optString("word", "").lowercase()
-                    val prevConf = prev.optDouble("conf", 0.0)
-                    if (prevWord == "hey" && prevConf >= 0.45) {
+                if (word == "jarvis") {
+                    if (i > 0) {
+                        val prev = words.getJSONObject(i - 1)
+                        val prevWord = prev.optString("word", "").lowercase()
+                        val prevConf = prev.optDouble("conf", 0.0)
+                        if (prevWord in setOf("hey", "hi", "ok", "okay", "hello") && prevConf >= 0.45) {
+                            jarvisWordIndex = i
+                            detected = true
+                            break
+                        }
+                    }
+                    if (conf >= 0.75) {
                         jarvisWordIndex = i
                         detected = true
                         break
