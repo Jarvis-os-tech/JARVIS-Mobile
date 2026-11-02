@@ -75,9 +75,17 @@ fun AssistantScreen(
 
             Spacer(modifier = Modifier.height(28.dp))
 
+            // Determine animated state from voiceStatus
+            val activeUiState = when {
+                voiceStatus.contains("Listening", ignoreCase = true) -> OverlayUiState.Listening(3500f)
+                voiceStatus.contains("Thinking", ignoreCase = true) -> OverlayUiState.Thinking("Thinking")
+                voiceStatus.contains("Speaking", ignoreCase = true) -> OverlayUiState.Speaking(3500f)
+                else -> OverlayUiState.Idle
+            }
+
             // Living Arc Reactor
             ArcReactorVisualizer(
-                state = OverlayUiState.Idle,
+                state = activeUiState,
                 size = 230.dp,
                 onClick = onTalkTapped
             )

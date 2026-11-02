@@ -25,6 +25,7 @@ import com.jarvis.os.nothing.NothingGlyphController
 import com.jarvis.os.net.GeminiLiveClient
 import com.jarvis.os.net.DeviceToolClient
 import com.jarvis.os.sync.CloudMemorySyncWorker
+import com.jarvis.os.sync.ApiCredentials
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -128,6 +129,32 @@ class JarvisVoiceService : Service() {
             }
             ACTION_STOP -> {
                 turnOffAssistant()
+            }
+            ACTION_ACTIVATE -> {
+                isRunning = true
+                try {
+                    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+                        startForeground(
+                            NOTIFICATION_ID,
+                            buildNotification("JARVIS Listening"),
+                            android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+                        )
+                    } else {
+                        startForeground(NOTIFICATION_ID, buildNotification("JARVIS Listening"))
+                    }
+                } catch (error: SecurityException) {
+                    Log.w(TAG, "Open JARVIS to enable microphone", error)
+                }
+                val apiKey = ApiCredentials.gemini(this)
+                if (apiKey.isNotBlank()) {
+                    serviceScope.launch {
+                        if (!enabled) {
+                            startVoicePipeline()
+                        }
+                        startupJob?.join()
+                        activateConversation(apiKey)
+                    }
+                }
             }
             ACTION_TOGGLE -> {
                 if (enabled) {
@@ -327,7 +354,7 @@ class JarvisVoiceService : Service() {
                 if (wakeDetector.process(chunk)) serviceScope.launch { activateConversation(apiKey) }
                 return@startCapture
             }
-            if (wakeDetector.processGoodbye(chunk)) {
+            if (!playbackEngine.hasPendingAudio && wakeDetector.processGoodbye(chunk)) {
                 serviceScope.launch { sayGoodbyeAndStandby() }
                 return@startCapture
             }
@@ -605,6 +632,7 @@ class JarvisVoiceService : Service() {
         const val ACTION_START = "com.jarvis.os.action.START"
         const val ACTION_STOP = "com.jarvis.os.action.STOP"
         const val ACTION_TOGGLE = "com.jarvis.os.action.TOGGLE"
+        const val ACTION_ACTIVATE = "com.jarvis.os.action.ACTIVATE"
 
         @Volatile
         var isRunning: Boolean = false

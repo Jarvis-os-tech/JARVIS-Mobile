@@ -77,6 +77,7 @@ class MainActivity : ComponentActivity() {
                     context = this,
                     onStartDaemon = { startVoiceDaemon() },
                     onStopDaemon = { stopVoiceDaemon() },
+                    onActivateTurn = { activateVoiceTurn() },
                     onRequestOverlay = { requestOverlayPermission() }
                 )
             }
@@ -119,6 +120,17 @@ class MainActivity : ComponentActivity() {
         Toast.makeText(this, "Starting Hey Jarvis standby", Toast.LENGTH_SHORT).show()
     }
 
+    private fun activateVoiceTurn() {
+        val intent = Intent(this, JarvisVoiceService::class.java).apply {
+            action = JarvisVoiceService.ACTION_ACTIVATE
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startForegroundService(intent)
+        } else {
+            startService(intent)
+        }
+    }
+
     private fun stopVoiceDaemon() {
         val intent = Intent(this, JarvisVoiceService::class.java).apply {
             action = JarvisVoiceService.ACTION_STOP
@@ -143,6 +155,7 @@ fun JarvisMobileScreen(
     context: Context,
     onStartDaemon: () -> Unit,
     onStopDaemon: () -> Unit,
+    onActivateTurn: () -> Unit,
     onRequestOverlay: () -> Unit
 ) {
     var selectedTab by remember { mutableStateOf(0) }
@@ -195,7 +208,8 @@ fun JarvisMobileScreen(
                 executionStatus = prefs.getString(key, "") ?: ""
             }
             if (key == "goodbye_close_requested") {
-                (context as? android.app.Activity)?.finishAndRemoveTask()
+                // Standby retained without force-closing activity
+                standbyActive = true
             }
         }
         voicePrefs.registerOnSharedPreferenceChangeListener(listener)
@@ -274,19 +288,11 @@ fun JarvisMobileScreen(
                             },
                             onOpenSetup = { showSetupDialog = true },
                             onTalkTapped = {
-                                if (!standbyActive) {
-                                    if (hasVoiceKey) {
-                                        onStartDaemon()
-                                        standbyActive = true
-                                    } else {
-                                        showSetupDialog = true
-                                    }
+                                if (hasVoiceKey) {
+                                    onActivateTurn()
+                                    standbyActive = true
                                 } else {
-                                    Toast.makeText(
-                                        context,
-                                        "JARVIS is listening · Say “Hey Jarvis”",
-                                        Toast.LENGTH_SHORT
-                                    ).show()
+                                    showSetupDialog = true
                                 }
                             }
                         )

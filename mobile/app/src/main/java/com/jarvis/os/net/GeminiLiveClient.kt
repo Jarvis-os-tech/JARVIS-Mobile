@@ -50,7 +50,7 @@ class GeminiLiveClient(
             return
         }
 
-        val url = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key=$apiKey"
+        val url = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=$apiKey"
         val request = Request.Builder().url(url).build()
 
         webSocket = client.newWebSocket(request, object : WebSocketListener() {
@@ -131,7 +131,9 @@ class GeminiLiveClient(
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                Log.e(TAG, "Gemini Live WebSocket failure: ${t.message}", t)
+                val code = response?.code
+                val body = try { response?.body?.string() } catch (_: Exception) { null }
+                Log.e(TAG, "Gemini Live WebSocket failure: ${t.message}, httpCode=$code, responseBody=$body", t)
                 isConnected.set(false)
                 onConnectionStateChanged?.invoke(false)
             }

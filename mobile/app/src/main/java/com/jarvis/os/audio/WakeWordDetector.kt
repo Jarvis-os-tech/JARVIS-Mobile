@@ -38,7 +38,7 @@ class WakeWordDetector(private val context: Context) {
             recognizer = Recognizer(loaded, 16000f,
                 "[\"hey jarvis\", \"jarvis\", \"jarvis command\", \"okay jarvis\", \"ok jarvis\", \"hello jarvis\", \"hi jarvis\", \"bye jarvis\", \"hey\", \"[unk]\"]").apply { setWords(true) }
             goodbyeRecognizer = Recognizer(loaded, 16000f,
-                "[\"bye\", \"goodbye\", \"bye jarvis\", \"goodbye jarvis\", \"[unk]\"]")
+                "[\"bye\", \"goodbye\", \"bye jarvis\", \"goodbye jarvis\", \"[unk]\"]").apply { setWords(true) }
             model = loaded
         } catch (error: Exception) {
             loaded.close()
@@ -117,19 +117,52 @@ class WakeWordDetector(private val context: Context) {
         if (!decoder.acceptWaveForm(pcm, pcm.size)) return false
         val result = JSONObject(decoder.result)
         val words = result.optJSONArray("result")
-        val detected = WakePhrase.matches(result.optString("text")) && words != null && words.length() >= 2 &&
-            words.getJSONObject(0).optString("word") == "hey" &&
-            words.getJSONObject(1).optString("word") == "jarvis" &&
-            words.getJSONObject(0).optDouble("conf", 0.0) >= 0.65 &&
-            words.getJSONObject(1).optDouble("conf", 0.0) >= 0.7
         val text = result.optString("text")
-        if (text.contains("jarvis") || text.startsWith("hey")) {
-            val first = words?.optJSONObject(0)
-            val second = words?.optJSONObject(1)
-            android.util.Log.i("WakeWordDetector", "Wake check: exact=${WakePhrase.matches(text)} heyConfidence=${first?.optDouble("conf", 0.0)} nameConfidence=${second?.optDouble("conf", 0.0)} accepted=$detected")
+
+        var detected = false
+        var jarvisWordIndex = -1
+
+        if (words != null && words.length() > 0) {
+            for (i in 0 until words.length()) {
+                val w = words.getJSONObject(i)
+                val word = w.optString("word", "").lowercase()
+                val conf = w.optDouble("conf", 0.0)
+
+                if (word == "jarvis" && conf >= 0.60) {
+                    jarvisWordIndex = i
+                    if (i > 0) {
+                        val prev = words.getJSONObject(i - 1)
+                        val prevWord = prev.optString("word", "").lowercase()
+                        val prevConf = prev.optDouble("conf", 0.0)
+                        if (prevWord in setOf("hey", "ok", "okay", "hello", "hi") && prevConf >= 0.50) {
+                            detected = true
+                            break
+                        }
+                    }
+                    if (conf >= 0.80) {
+                        // Direct "Jarvis" invocation with strong confidence
+                        detected = true
+                        break
+                    }
+                }
+            }
         }
+
+        if (text.contains("jarvis", ignoreCase = true) || text.contains("hey", ignoreCase = true)) {
+            android.util.Log.i("WakeWordDetector", "Wake check: text='$text' jarvisIndex=$jarvisWordIndex accepted=$detected")
+        }
+
         if (detected) {
-            wakeCommand = text.trim().split(Regex("\\s+")).drop(2).joinToString(" ").takeUnless { it.isBlank() || it.contains("[unk]") }
+            val commandWords = mutableListOf<String>()
+            if (words != null && jarvisWordIndex >= 0) {
+                for (j in (jarvisWordIndex + 1) until words.length()) {
+                    val w = words.getJSONObject(j).optString("word", "")
+                    if (w.isNotBlank() && w != "[unk]") {
+                        commandWords.add(w)
+                    }
+                }
+            }
+            wakeCommand = commandWords.joinToString(" ").takeUnless { it.isBlank() }
             decoder.reset()
         }
         return detected
@@ -149,9 +182,18 @@ class WakeWordDetector(private val context: Context) {
     @Synchronized
     fun processGoodbye(pcm: ByteArray): Boolean {
         val decoder = goodbyeRecognizer ?: return false
+        if (VadDetector.calculateRms(pcm) < BASE_ENERGY_THRESHOLD) return false
         if (!decoder.acceptWaveForm(pcm, pcm.size)) return false
-        val text = JSONObject(decoder.result).optString("text")
-        return GoodbyePhrase.matches(text)
+        val result = JSONObject(decoder.result)
+        val text = result.optString("text").trim().lowercase().replace(Regex("\\s+"), " ")
+        if (!GoodbyePhrase.matches(text)) return false
+        val words = result.optJSONArray("result") ?: return false
+        if (words.length() == 0) return false
+        for (i in 0 until words.length()) {
+            val conf = words.getJSONObject(i).optDouble("conf", 0.0)
+            if (conf < 0.75) return false
+        }
+        return true
     }
 
     @Synchronized
