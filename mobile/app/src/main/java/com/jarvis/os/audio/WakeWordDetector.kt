@@ -150,10 +150,15 @@ class WakeWordDetector(private val context: Context) {
 
         if (!detected && text.isNotBlank()) {
             val normalized = text.lowercase().replace(Regex("\\s+"), " ")
-            if (WakePhrase.matches(text) || normalized.contains("hey jarvis")) {
-                if (!normalized.startsWith("okay jarvis") && !normalized.startsWith("ok jarvis") && !normalized.startsWith("hello jarvis")) {
-                    detected = true
-                }
+            if (WakePhrase.matches(text) ||
+                normalized.contains("hey jarvis") ||
+                normalized.contains("hello jarvis") ||
+                normalized.contains("hi jarvis") ||
+                normalized.contains("ok jarvis") ||
+                normalized.contains("okay jarvis") ||
+                normalized == "jarvis" ||
+                normalized.startsWith("jarvis ")) {
+                detected = true
             }
         }
 
