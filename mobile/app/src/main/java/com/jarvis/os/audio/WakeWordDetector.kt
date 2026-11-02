@@ -113,34 +113,27 @@ class WakeWordDetector(private val context: Context) {
     @Synchronized
     fun processDecoder(pcm: ByteArray): Boolean {
         val decoder = recognizer ?: return false
-        // Partial hypotheses can briefly invent "hey" before correcting to "Jarvis".
-        if (!decoder.acceptWaveForm(pcm, pcm.size)) return false
-        val result = JSONObject(decoder.result)
+        val accepted = decoder.acceptWaveForm(pcm, pcm.size)
+        val jsonStr = if (accepted) decoder.result else decoder.partialResult
+        val result = try { JSONObject(jsonStr) } catch (_: Exception) { return false }
         val words = result.optJSONArray("result")
-        val text = result.optString("text")
+        val text = (if (accepted) result.optString("text") else result.optString("partial")).trim()
 
         var detected = false
         var jarvisWordIndex = -1
 
-        if (words != null && words.length() > 0) {
-            for (i in 0 until words.length()) {
+        if (words != null && words.length() >= 2) {
+            for (i in 1 until words.length()) {
                 val w = words.getJSONObject(i)
                 val word = w.optString("word", "").lowercase()
                 val conf = w.optDouble("conf", 0.0)
 
-                if (word == "jarvis" && conf >= 0.60) {
-                    jarvisWordIndex = i
-                    if (i > 0) {
-                        val prev = words.getJSONObject(i - 1)
-                        val prevWord = prev.optString("word", "").lowercase()
-                        val prevConf = prev.optDouble("conf", 0.0)
-                        if (prevWord in setOf("hey", "ok", "okay", "hello", "hi") && prevConf >= 0.50) {
-                            detected = true
-                            break
-                        }
-                    }
-                    if (conf >= 0.80) {
-                        // Direct "Jarvis" invocation with strong confidence
+                if (word == "jarvis" && conf >= 0.55) {
+                    val prev = words.getJSONObject(i - 1)
+                    val prevWord = prev.optString("word", "").lowercase()
+                    val prevConf = prev.optDouble("conf", 0.0)
+                    if (prevWord == "hey" && prevConf >= 0.45) {
+                        jarvisWordIndex = i
                         detected = true
                         break
                     }
@@ -148,8 +141,17 @@ class WakeWordDetector(private val context: Context) {
             }
         }
 
+        if (!detected && text.isNotBlank()) {
+            val normalized = text.lowercase().replace(Regex("\\s+"), " ")
+            if (WakePhrase.matches(text) || normalized.contains("hey jarvis")) {
+                if (!normalized.startsWith("okay jarvis") && !normalized.startsWith("ok jarvis") && !normalized.startsWith("hello jarvis")) {
+                    detected = true
+                }
+            }
+        }
+
         if (text.contains("jarvis", ignoreCase = true) || text.contains("hey", ignoreCase = true)) {
-            android.util.Log.i("WakeWordDetector", "Wake check: text='$text' jarvisIndex=$jarvisWordIndex accepted=$detected")
+            android.util.Log.i("WakeWordDetector", "Wake check: text='$text' accepted=$detected")
         }
 
         if (detected) {
@@ -159,6 +161,14 @@ class WakeWordDetector(private val context: Context) {
                     val w = words.getJSONObject(j).optString("word", "")
                     if (w.isNotBlank() && w != "[unk]") {
                         commandWords.add(w)
+                    }
+                }
+            } else {
+                val parts = text.split(Regex("\\s+"))
+                val idx = parts.indexOfFirst { it.equals("jarvis", ignoreCase = true) }
+                if (idx >= 0 && idx + 1 < parts.size) {
+                    for (j in (idx + 1) until parts.size) {
+                        if (parts[j] != "[unk]") commandWords.add(parts[j])
                     }
                 }
             }
@@ -184,14 +194,14 @@ class WakeWordDetector(private val context: Context) {
         val decoder = goodbyeRecognizer ?: return false
         if (VadDetector.calculateRms(pcm) < BASE_ENERGY_THRESHOLD) return false
         if (!decoder.acceptWaveForm(pcm, pcm.size)) return false
-        val result = JSONObject(decoder.result)
+        val result = try { JSONObject(decoder.result) } catch (_: Exception) { return false }
         val text = result.optString("text").trim().lowercase().replace(Regex("\\s+"), " ")
         if (!GoodbyePhrase.matches(text)) return false
-        val words = result.optJSONArray("result") ?: return false
-        if (words.length() == 0) return false
+        val words = result.optJSONArray("result") ?: return true
+        if (words.length() == 0) return true
         for (i in 0 until words.length()) {
             val conf = words.getJSONObject(i).optDouble("conf", 0.0)
-            if (conf < 0.75) return false
+            if (conf < 0.65) return false
         }
         return true
     }
@@ -220,8 +230,8 @@ class WakeWordDetector(private val context: Context) {
     }
 
     companion object {
-        const val BASE_ENERGY_THRESHOLD = 300.0
-        const val PRE_ROLL_CHUNKS = 4 // ~80ms pre-speech audio buffer
+        const val BASE_ENERGY_THRESHOLD = 80.0
+        const val PRE_ROLL_CHUNKS = 8 // ~160ms pre-speech audio buffer
         const val HANGOVER_FRAMES = 50 // ~1.0 second of trailing silence
     }
 }

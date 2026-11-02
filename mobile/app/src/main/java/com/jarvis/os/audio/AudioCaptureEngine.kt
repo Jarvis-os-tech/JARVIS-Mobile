@@ -19,7 +19,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 class AudioCaptureEngine(
     private val sampleRate: Int = SAMPLE_RATE_HZ,
     private val chunkByteSize: Int = CHUNK_SIZE_BYTES,
-    private val audioSource: Int = MediaRecorder.AudioSource.VOICE_COMMUNICATION
+    private val audioSource: Int = MediaRecorder.AudioSource.MIC
 ) {
     private val isRecording = AtomicBoolean(false)
     private var captureJob: Job? = null

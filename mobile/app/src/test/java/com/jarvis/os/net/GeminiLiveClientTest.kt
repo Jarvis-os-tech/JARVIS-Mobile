@@ -36,7 +36,7 @@ class GeminiLiveClientTest {
         )
 
         assertTrue("Setup must contain setup key", setupJson.contains("\"setup\":"))
-        assertTrue("Setup must specify supported live model", setupJson.contains("models/gemini-3.8-live"))
+        assertTrue("Setup must specify supported live model", setupJson.contains(LiveSessionModels.DEFAULT_MODEL))
         assertTrue("Setup must specify responseModalities AUDIO", setupJson.contains("\"AUDIO\""))
         assertTrue("Setup must configure Aoede voice", setupJson.contains("\"Aoede\""))
         assertTrue("Setup must declare play_local_filler tool", setupJson.contains("\"play_local_filler\""))

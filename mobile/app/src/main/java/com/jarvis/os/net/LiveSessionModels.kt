@@ -28,7 +28,7 @@ data class FunctionCall(
  * Helpers for framing, serializing, and parsing Gemini Live bidirectional WebSocket payloads.
  */
 object LiveSessionModels {
-    const val DEFAULT_MODEL = "models/gemini-3.8-live"
+    const val DEFAULT_MODEL = "models/gemini-2.5-flash"
 
     fun buildSetupJson(
         model: String = DEFAULT_MODEL,

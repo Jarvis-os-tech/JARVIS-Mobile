@@ -77,6 +77,8 @@ class JarvisVoiceService : Service() {
     @Volatile private var suppressOldResponse = false
     @Volatile private var modelTurnFinished = false
     @Volatile private var closingForGoodbye = false
+    @Volatile private var userSpokeInTurn = false
+    @Volatile private var postSpeechSilenceFrames = 0
     private val userTranscriptBuilder = java.lang.StringBuilder()
     private val assistantTranscriptBuilder = java.lang.StringBuilder()
     private var goodbyeTimeout: Job? = null
@@ -363,6 +365,8 @@ class JarvisVoiceService : Service() {
 
             when (vadResult.state) {
                 VadState.SPEECH -> {
+                    userSpokeInTurn = true
+                    postSpeechSilenceFrames = 0
                     // Cut the speaker locally on deliberate user barge-in (sufficient duration and energy over speaker audio).
                     if (vadResult.speechFrameCount >= 10 && vadResult.energy >= 2500.0 && playbackEngine.hasPendingAudio) {
                         synchronized(responseLock) {
@@ -384,20 +388,31 @@ class JarvisVoiceService : Service() {
 
                 VadState.HANGOVER -> {
                     // Still within speech continuation window
+                    postSpeechSilenceFrames = 0
                     geminiClient.sendAudio(chunk)
                 }
 
                 VadState.SILENCE -> {
                     // The server's automatic VAD needs silence to end the user's turn.
                     geminiClient.sendAudio(chunk)
-                    serviceScope.launch { if (activeSession && _currentState.value == ConversationState.LISTENING) {
-                        // User finished speaking, now waiting for response
-                        updateState(ConversationState.THINKING)
-                    } }
+                    if (userSpokeInTurn) {
+                        postSpeechSilenceFrames++
+                        if (postSpeechSilenceFrames >= 20) { // ~400ms silence after speech
+                            userSpokeInTurn = false
+                            postSpeechSilenceFrames = 0
+                            serviceScope.launch {
+                                if (activeSession && _currentState.value == ConversationState.LISTENING) {
+                                    // User finished speaking, now waiting for response
+                                    updateState(ConversationState.THINKING)
+                                }
+                            }
+                        }
+                    }
                 }
 
                 VadState.ATTACK -> {
                     // Attack onset, buffer or stream
+                    postSpeechSilenceFrames = 0
                     geminiClient.sendAudio(chunk)
                 }
             }
@@ -434,6 +449,8 @@ class JarvisVoiceService : Service() {
             assistantTranscriptBuilder.setLength(0)
         }
         vadDetector.reset()
+        userSpokeInTurn = false
+        postSpeechSilenceFrames = 0
         glyphController.onWakeWordDetected()
         Log.i(TAG, "Hey Jarvis detected; activating conversation")
         updateState(ConversationState.THINKING)
@@ -476,6 +493,8 @@ class JarvisVoiceService : Service() {
         activeSession = false
         suppressOldResponse = false
         modelTurnFinished = false
+        userSpokeInTurn = false
+        postSpeechSilenceFrames = 0
         geminiClient.disconnect()
         playbackEngine.cancel()
         fillerMixer.cancel()

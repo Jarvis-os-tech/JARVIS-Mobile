@@ -219,7 +219,12 @@ fun JarvisMobileScreen(
     // Core Runtime Permissions
     val permissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestMultiplePermissions()
-    ) { _ ->
+    ) { results ->
+        if (results[Manifest.permission.RECORD_AUDIO] == true) {
+            if (ApiCredentials.gemini(context).isNotBlank()) {
+                onStartDaemon()
+            }
+        }
         overlayGranted = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             Settings.canDrawOverlays(context)
         } else true
