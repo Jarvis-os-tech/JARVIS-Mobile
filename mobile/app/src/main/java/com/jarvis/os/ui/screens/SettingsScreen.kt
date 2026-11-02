@@ -78,7 +78,7 @@ fun SettingsScreen(
         ) {
             Column(modifier = Modifier.padding(18.dp)) {
                 Text(
-                    text = if (hasVoiceKey) "Gemini 2.0 Flash / Live Active" else "API Key Missing",
+                    text = if (hasVoiceKey) "Gemini Live Voice Active" else "API Key Missing",
                     fontSize = 15.sp,
                     fontWeight = FontWeight.Bold,
                     color = TextWhite
@@ -111,6 +111,23 @@ fun SettingsScreen(
             }
         }
 
+        Spacer(modifier = Modifier.height(24.dp))
+
+        Text("PHONE SYSTEM ACCESS", color = ElectricCyan, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+        Spacer(modifier = Modifier.height(8.dp))
+        Text("Enable the controls you want JARVIS to use. Android will ask you to grant access.", color = TextMuted, fontSize = 12.sp)
+        listOf(
+            "System settings control" to android.provider.Settings.ACTION_MANAGE_WRITE_SETTINGS,
+            "Voice navigation and screen control" to android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS,
+            "Do Not Disturb control" to android.provider.Settings.ACTION_NOTIFICATION_POLICY_ACCESS_SETTINGS
+        ).forEach { (label, action) ->
+            OutlinedButton(onClick = {
+                val intent = android.content.Intent(action).addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                if (action == android.provider.Settings.ACTION_MANAGE_WRITE_SETTINGS)
+                    intent.data = android.net.Uri.parse("package:${context.packageName}")
+                context.startActivity(intent)
+            }, modifier = Modifier.fillMaxWidth()) { Text(label) }
+        }
         Spacer(modifier = Modifier.height(24.dp))
 
         // SECTION 2: OTA SOFTWARE UPDATES

@@ -1,6 +1,7 @@
 package com.jarvis.os.control
 
 import android.Manifest
+import android.app.NotificationManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -35,6 +36,12 @@ class PhoneActions(private val context: Context) {
                 result.put("can_read_contacts", permission(Manifest.permission.READ_CONTACTS))
                 result.put("can_place_calls", permission(Manifest.permission.CALL_PHONE))
                 result.put("voice_navigation_enabled", PhoneNavigationService.available)
+                result.put("auto_brightness", Settings.System.getInt(context.contentResolver, Settings.System.SCREEN_BRIGHTNESS_MODE, 0) == 1)
+                result.put("auto_rotate", Settings.System.getInt(context.contentResolver, Settings.System.ACCELEROMETER_ROTATION, 0) == 1)
+                result.put("screen_timeout_seconds", Settings.System.getInt(context.contentResolver, Settings.System.SCREEN_OFF_TIMEOUT, 30000) / 1000)
+                val notifications = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                result.put("can_control_do_not_disturb", notifications.isNotificationPolicyAccessGranted)
+                result.put("ringer_mode", audio.ringerMode)
             }
             "set_volume" -> {
                 val percent = PhoneActionRules.percent(args["percent"])
@@ -55,6 +62,49 @@ class PhoneActions(private val context: Context) {
                 check(Settings.System.putInt(context.contentResolver, Settings.System.SCREEN_BRIGHTNESS_MODE, Settings.System.SCREEN_BRIGHTNESS_MODE_MANUAL))
                 check(Settings.System.putInt(context.contentResolver, Settings.System.SCREEN_BRIGHTNESS, maxOf(1, percent * 255 / 100)))
                 result.put("percent", percent)
+            }
+            "set_auto_brightness", "set_auto_rotate", "set_screen_timeout" -> {
+                if (!Settings.System.canWrite(context)) return needed("Modify system settings")
+                val key: String
+                val value: Int
+                when (action) {
+                    "set_screen_timeout" -> {
+                        key = Settings.System.SCREEN_OFF_TIMEOUT
+                        value = PhoneActionRules.timeoutMillis(args["seconds"])
+                    }
+                    else -> {
+                        key = if (action == "set_auto_rotate") Settings.System.ACCELEROMETER_ROTATION else Settings.System.SCREEN_BRIGHTNESS_MODE
+                        value = if (args["enabled"] as? Boolean ?: error("Enabled must be true or false")) 1 else 0
+                    }
+                }
+                check(Settings.System.putInt(context.contentResolver, key, value)) { "Android did not accept this setting" }
+                val actual = Settings.System.getInt(context.contentResolver, key, -1)
+                check(actual == value) { "Setting did not match the requested value" }
+                result.put("verified", true).put("value", if (action == "set_screen_timeout") actual / 1000 else actual)
+            }
+            "set_ringer_mode" -> {
+                val mode = when (args["mode"] as? String) {
+                    "normal" -> AudioManager.RINGER_MODE_NORMAL
+                    "vibrate" -> AudioManager.RINGER_MODE_VIBRATE
+                    "silent" -> AudioManager.RINGER_MODE_SILENT
+                    else -> error("Use normal, vibrate or silent")
+                }
+                val notifications = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                if ((mode == AudioManager.RINGER_MODE_SILENT || audio.ringerMode == AudioManager.RINGER_MODE_SILENT) && !notifications.isNotificationPolicyAccessGranted)
+                    return needed("Do Not Disturb access")
+                audio.ringerMode = mode
+                check(audio.ringerMode == mode) { "Android did not change the ringer mode" }
+                result.put("verified", true).put("mode", args["mode"])
+            }
+            "set_do_not_disturb" -> {
+                val notifications = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                if (!notifications.isNotificationPolicyAccessGranted) return needed("Do Not Disturb access")
+                val enabled = args["enabled"] as? Boolean ?: error("Enabled must be true or false")
+                val filter = if (enabled) NotificationManager.INTERRUPTION_FILTER_PRIORITY else NotificationManager.INTERRUPTION_FILTER_ALL
+                notifications.setInterruptionFilter(filter)
+                if (notifications.currentInterruptionFilter != filter)
+                    return result.put("status", "change_requested").put("message", "Android received the DND request; the global state is not yet verified.")
+                result.put("verified", true).put("enabled", enabled)
             }
             "flashlight_on", "flashlight_off" -> {
                 if (!permission(Manifest.permission.CAMERA)) return needed("Camera for flashlight")
@@ -80,11 +130,28 @@ class PhoneActions(private val context: Context) {
                     "display" -> Settings.ACTION_DISPLAY_SETTINGS
                     "accessibility" -> Settings.ACTION_ACCESSIBILITY_SETTINGS
                     "brightness_permission" -> Settings.ACTION_MANAGE_WRITE_SETTINGS
+                    "dnd_permission" -> Settings.ACTION_NOTIFICATION_POLICY_ACCESS_SETTINGS
+                    "notifications" -> Settings.ACTION_APP_NOTIFICATION_SETTINGS
+                    "location" -> Settings.ACTION_LOCATION_SOURCE_SETTINGS
+                    "mobile_data" -> Settings.ACTION_DATA_ROAMING_SETTINGS
+                    "airplane" -> Settings.ACTION_AIRPLANE_MODE_SETTINGS
+                    "hotspot" -> "android.settings.TETHER_SETTINGS"
+                    "battery" -> Settings.ACTION_BATTERY_SAVER_SETTINGS
+                    "storage" -> Settings.ACTION_INTERNAL_STORAGE_SETTINGS
+                    "security" -> Settings.ACTION_SECURITY_SETTINGS
+                    "privacy" -> Settings.ACTION_PRIVACY_SETTINGS
+                    "date_time" -> Settings.ACTION_DATE_SETTINGS
+                    "language" -> Settings.ACTION_LOCALE_SETTINGS
+                    "apps" -> Settings.ACTION_APPLICATION_SETTINGS
+                    "app_info" -> Settings.ACTION_APPLICATION_DETAILS_SETTINGS
+                    "vpn" -> Settings.ACTION_VPN_SETTINGS
                     "general" -> Settings.ACTION_SETTINGS
                     else -> error("Unsupported settings screen")
                 }
                 val intent = Intent(target)
-                if (target == Settings.ACTION_MANAGE_WRITE_SETTINGS) intent.data = Uri.parse("package:${context.packageName}")
+                if (target in listOf(Settings.ACTION_MANAGE_WRITE_SETTINGS, Settings.ACTION_APPLICATION_DETAILS_SETTINGS))
+                    intent.data = Uri.parse("package:${context.packageName}")
+                if (target == Settings.ACTION_APP_NOTIFICATION_SETTINGS) intent.putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
                 launch(intent)
                 return result.put("status", "settings_opened").put("message", "Settings opened; a toggle has not been changed yet. Use phone navigation or let the user choose.")
             }
@@ -167,6 +234,17 @@ class PhoneActions(private val context: Context) {
 }
 
 object PhoneActionRules {
+    fun matchApps(query: String, apps: List<Pair<String, String>>): List<Pair<String, String>> {
+        require(query.isNotBlank())
+        val unique = apps.distinctBy { it.second }
+        val exact = unique.filter { it.first.equals(query.trim(), true) }
+        return if (exact.isNotEmpty()) exact else unique.filter { it.first.contains(query.trim(), true) }
+    }
+    fun timeoutMillis(value: Any?): Int {
+        val seconds = (value as? Number)?.toDouble() ?: error("Timeout seconds required")
+        require(seconds.isFinite() && seconds in 15.0..1800.0 && seconds % 1.0 == 0.0) { "Use a whole screen timeout from 15 to 1800 seconds" }
+        return seconds.toInt() * 1000
+    }
     fun percent(value: Any?): Int {
         val number = (value as? Number)?.toDouble() ?: error("Percentage required")
         require(number.isFinite() && number in 0.0..100.0) { "Use a percentage from 0 to 100" }

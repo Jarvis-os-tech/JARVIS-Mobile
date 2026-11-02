@@ -94,6 +94,11 @@ class PhoneNavigationService : AccessibilityService() {
                     "recents" -> GLOBAL_ACTION_RECENTS
                     "notifications" -> GLOBAL_ACTION_NOTIFICATIONS
                     "quick_settings" -> GLOBAL_ACTION_QUICK_SETTINGS
+                    "power_menu" -> GLOBAL_ACTION_POWER_DIALOG
+                    "lock_screen" -> {
+                        require(android.os.Build.VERSION.SDK_INT >= 28) { "Screen locking needs Android 9 or newer" }
+                        GLOBAL_ACTION_LOCK_SCREEN
+                    }
                     else -> error("Unsupported phone navigation action")
                 }
                 check(performGlobalAction(global)) { "Android could not perform this navigation action" }

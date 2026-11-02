@@ -48,6 +48,9 @@ object LiveSessionModels {
         val responseModalities = JSONArray()
         responseModalities.put("AUDIO")
         generationConfig.put("responseModalities", responseModalities)
+        if (model.contains("gemini-2.5") && model.contains("native-audio")) {
+            generationConfig.put("thinkingConfig", JSONObject().put("thinkingBudget", 0))
+        }
 
         val speechConfig = JSONObject()
         val voiceConfig = JSONObject()
@@ -65,7 +68,7 @@ object LiveSessionModels {
                 .put("disabled", false)
                 .put("startOfSpeechSensitivity", "START_SENSITIVITY_HIGH")
                 .put("prefixPaddingMs", 80)
-                .put("silenceDurationMs", 500)))
+                .put("silenceDurationMs", 400)))
 
         val systemInstruction = JSONObject()
         val parts = JSONArray()
