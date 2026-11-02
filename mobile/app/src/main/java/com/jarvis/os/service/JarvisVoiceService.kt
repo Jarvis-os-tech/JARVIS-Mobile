@@ -21,6 +21,7 @@ import com.jarvis.os.audio.WakeWordDetector
 import com.jarvis.os.gemini.ConversationState
 import com.jarvis.os.overlay.OverlayUiState
 import com.jarvis.os.overlay.OverlayWindowManager
+import com.jarvis.os.nothing.NothingGlyphController
 import com.jarvis.os.net.GeminiLiveClient
 import com.jarvis.os.net.DeviceToolClient
 import com.jarvis.os.sync.CloudMemorySyncWorker
@@ -60,6 +61,7 @@ class JarvisVoiceService : Service() {
     private var pendingToolCalls = 0
     private var commandAfterWake: String? = null
     private var overlayManager: OverlayWindowManager? = null
+    private val glyphController by lazy { NothingGlyphController(this) }
 
     private val _currentState = MutableStateFlow(ConversationState.IDLE)
     val currentState: StateFlow<ConversationState> = _currentState.asStateFlow()
@@ -96,6 +98,7 @@ class JarvisVoiceService : Service() {
         } catch (e: Exception) {
             Log.w(TAG, "Unable to initialize overlay window: ${e.message}")
         }
+        glyphController.init()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -404,6 +407,7 @@ class JarvisVoiceService : Service() {
             assistantTranscriptBuilder.setLength(0)
         }
         vadDetector.reset()
+        glyphController.onWakeWordDetected()
         Log.i(TAG, "Hey Jarvis detected; activating conversation")
         updateState(ConversationState.THINKING)
         val identity = sessionIdentity
@@ -534,6 +538,13 @@ class JarvisVoiceService : Service() {
 
     private fun updateState(newState: ConversationState, rms: Float = 0f) {
         _currentState.value = newState
+        when (newState) {
+            ConversationState.IDLE -> glyphController.onIdle()
+            ConversationState.LISTENING -> glyphController.onListening()
+            ConversationState.THINKING -> glyphController.onThinking()
+            ConversationState.SPEAKING -> glyphController.onSpeaking()
+            ConversationState.ERROR -> glyphController.onIdle()
+        }
         val uiState = when (newState) {
             ConversationState.IDLE -> OverlayUiState.Idle
             ConversationState.LISTENING -> OverlayUiState.Listening(rms)
@@ -583,6 +594,7 @@ class JarvisVoiceService : Service() {
         wakeDetector.close()
         overlayManager?.detach()
         overlayManager = null
+        glyphController.destroy()
         releaseWakeLock()
         serviceScope.cancel()
     }
