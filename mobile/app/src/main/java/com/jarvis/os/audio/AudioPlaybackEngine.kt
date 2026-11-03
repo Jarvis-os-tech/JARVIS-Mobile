@@ -20,12 +20,14 @@ class AudioPlaybackEngine(private val sampleRate: Int = SAMPLE_RATE_HZ) {
     private var drained = true
     private var paused = false
     var onPlaybackDrained: (() -> Unit)? = null
+    var onPlaybackFailure: (() -> Unit)? = null
 
     val hasPendingAudio: Boolean
         get() = synchronized(lock) { hasPendingAudioLocked() }
 
     private fun hasPendingAudioLocked(): Boolean {
-        val played = audioTrack?.playbackHeadPosition?.toLong()?.and(0xffffffffL) ?: 0L
+        val played = try { audioTrack?.playbackHeadPosition?.toLong()?.and(0xffffffffL) ?: 0L }
+            catch (_: IllegalStateException) { invalidateTrack(); onPlaybackFailure?.invoke(); return false }
         return queuedBytes > 0 || writtenFrames > played
     }
 
@@ -41,9 +43,14 @@ class AudioPlaybackEngine(private val sampleRate: Int = SAMPLE_RATE_HZ) {
                 .setChannelMask(AudioFormat.CHANNEL_OUT_MONO).build())
             .setBufferSizeInBytes(maxOf(minimum, 4096))
             .setTransferMode(AudioTrack.MODE_STREAM).build()
-        check(track.state == AudioTrack.STATE_INITIALIZED) { "Speaker unavailable" }
-        track.play()
-        audioTrack = track
+        try {
+            check(track.state == AudioTrack.STATE_INITIALIZED) { "Speaker unavailable" }
+            track.play()
+            audioTrack = track
+        } catch (error: Exception) {
+            try { track.release() } catch (_: Exception) { }
+            throw error
+        }
     }
 
     fun playPcm(data: ByteArray): Int = synchronized(lock) {
@@ -59,11 +66,14 @@ class AudioPlaybackEngine(private val sampleRate: Int = SAMPLE_RATE_HZ) {
             data.size
         } catch (error: Exception) {
             Log.e(TAG, "Unable to queue audio", error)
+            invalidateTrack()
+            onPlaybackFailure?.invoke()
             -1
         }
     }
 
     private fun drainAudio() {
+        var processingGeneration = -1L
         try {
             while (!Thread.currentThread().isInterrupted) {
                 val timeoutMs = synchronized(lock) {
@@ -71,6 +81,7 @@ class AudioPlaybackEngine(private val sampleRate: Int = SAMPLE_RATE_HZ) {
                 }
                 val chunk = queue.poll(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS)
                 if (chunk != null) {
+                    processingGeneration = chunk.generation
                     var offset = 0
                     while (offset < chunk.bytes.size && !Thread.currentThread().isInterrupted) {
                         val written = synchronized(lock) {
@@ -85,7 +96,10 @@ class AudioPlaybackEngine(private val sampleRate: Int = SAMPLE_RATE_HZ) {
                             }
                             count
                         }
-                        if (written < 0) break
+                        if (written < 0) {
+                            if (synchronized(lock) { chunk.generation != generation }) break
+                            throw IllegalStateException("Speaker write failed")
+                        }
                         offset += written
                         if (written == 0) Thread.sleep(3)
                     }
@@ -99,8 +113,18 @@ class AudioPlaybackEngine(private val sampleRate: Int = SAMPLE_RATE_HZ) {
             // release() terminates the worker.
         } catch (error: Exception) {
             Log.e(TAG, "Playback worker failed", error)
-            cancel()
+            val currentFailure = synchronized(lock) {
+                if (processingGeneration == generation) { invalidateTrack(); true } else false
+            }
+            if (currentFailure) onPlaybackFailure?.invoke()
         }
+    }
+
+    private fun invalidateTrack() {
+        generation++; queue.clear(); queuedBytes = 0; writtenFrames = 0; drained = true; paused = false
+        worker?.interrupt(); worker = null
+        val broken = audioTrack; audioTrack = null
+        try { broken?.release() } catch (_: Exception) { }
     }
 
     fun cancel() = synchronized(lock) {
@@ -111,8 +135,8 @@ class AudioPlaybackEngine(private val sampleRate: Int = SAMPLE_RATE_HZ) {
         drained = true
         paused = false
         audioTrack?.let { track ->
-            track.pause()
-            track.flush()
+            try { track.pause(); track.flush() }
+            catch (_: IllegalStateException) { invalidateTrack() }
         }
         Log.i(TAG, "Playback interrupted: queued audio discarded")
     }

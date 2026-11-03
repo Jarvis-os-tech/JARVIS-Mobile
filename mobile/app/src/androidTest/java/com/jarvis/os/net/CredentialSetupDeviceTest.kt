@@ -22,6 +22,7 @@ class CredentialSetupDeviceTest {
     }
 
     @Test fun migratesLegacyKeyAndKeepsBothSetupModesEncrypted() {
+        assertSame(QrPairingScanner.getSecurePrefs(context), QrPairingScanner.getSecurePrefs(context))
         val first = "test-gemini-" + "a".repeat(30)
         val second = "test-gemini-" + "b".repeat(30)
         val plain = context.getSharedPreferences("jarvis_prefs", Context.MODE_PRIVATE)

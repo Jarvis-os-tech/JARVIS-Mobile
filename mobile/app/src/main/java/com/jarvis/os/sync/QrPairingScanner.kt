@@ -22,11 +22,19 @@ object QrPairingScanner {
     private const val KEY_ENDPOINT = "paired_endpoint"
     private const val KEY_GEMINI_KEY = "gemini_api_key"
 
-    internal fun getSecurePrefs(context: Context): SharedPreferences {
-        val masterKey = MasterKey.Builder(context).setKeyScheme(MasterKey.KeyScheme.AES256_GCM).build()
-        return EncryptedSharedPreferences.create(context, PREFS_FILE, masterKey,
+    private val securePrefsCache = java.util.WeakHashMap<Context, SharedPreferences>()
+
+    internal fun getSecurePrefs(context: Context): SharedPreferences = synchronized(securePrefsCache) {
+        // Cache the encrypted store, never plaintext credentials. Context identity also preserves
+        // isolated test/storage namespaces. Failed key-store initialization is never cached.
+        val owner = context.applicationContext ?: context
+        securePrefsCache[owner]?.let { return@synchronized it }
+        val masterKey = MasterKey.Builder(owner).setKeyScheme(MasterKey.KeyScheme.AES256_GCM).build()
+        val prefs = EncryptedSharedPreferences.create(owner, PREFS_FILE, masterKey,
             EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
             EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM)
+        securePrefsCache[owner] = prefs
+        prefs
     }
 
     /**

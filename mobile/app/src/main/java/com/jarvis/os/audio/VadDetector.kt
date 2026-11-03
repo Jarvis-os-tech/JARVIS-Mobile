@@ -40,7 +40,17 @@ class VadDetector(
     private var currentState: VadState = VadState.SILENCE
     private var speechFrames: Int = 0
     private var silenceFrames: Int = 0
-    private var estimatedNoiseFloor: Double = 300.0
+    private var estimatedNoiseFloor: Double = 100.0
+    private val ambient = DoubleArray(100)
+    private var ambientCount = 0
+    private var ambientIndex = 0
+
+    /** Learn room noise in standby; a low percentile avoids treating speech peaks as noise. */
+    @Synchronized fun observeBackground(frame: ByteArray) {
+        ambient[ambientIndex] = calculateRms(frame)
+        ambientIndex = (ambientIndex + 1) % ambient.size
+        ambientCount = minOf(ambientCount + 1, ambient.size)
+    }
 
     /**
      * Process a raw 16-bit mono PCM frame (little-endian byte array).
@@ -62,7 +72,7 @@ class VadDetector(
         }
 
         val effectiveThreshold = if (adaptiveNoiseFloor) {
-            maxOf(energyThreshold, estimatedNoiseFloor * 3.0)
+            maxOf(energyThreshold, estimatedNoiseFloor * 2.0)
         } else {
             energyThreshold
         }
@@ -163,7 +173,11 @@ class VadDetector(
     /**
      * Reset the VAD state machine to clean silence.
      */
-    fun reset() {
+    @Synchronized fun reset() {
+        if (ambientCount >= 10) {
+            val sorted = ambient.copyOf(ambientCount).sortedArray()
+            estimatedNoiseFloor = maxOf(30.0, sorted[ambientCount / 5])
+        }
         currentState = VadState.SILENCE
         speechFrames = 0
         silenceFrames = 0

@@ -40,3 +40,13 @@ New direct controls include auto-brightness, auto-rotate, screen timeout, ringer
 ### Public updater repair (1.4.1)
 
 The home and settings version labels now read Android's installed package version; the old fixed `v1.2.3`/`v1.3.0` labels did not indicate the actual installed build. Public manifest requests have a short deadline and fresh download URLs. Downloads show percent and MB, retain interrupted partial files, and resume only when the user taps Update again. Range responses, size, SHA-256, package version and installed signing identity are verified. The UI reports the actual error and offers a public browser download fallback. Updates and Android installation approval remain manual.
+
+### Voice response and recovery (1.5.0)
+
+Restores the PC-aligned `gemini-3.8-live` default; the earlier compatibility repair had selected the slower 2.5 native audio model. Supported 3.1 and 2.5 native audio fallbacks remain available. The standard 3.8 model uses its fixed reasoning profile, without unsupported thinking-budget settings.
+
+The phone now frames speech explicitly: a local turn ends after about 400 ms of quiet, rather than waiting indefinitely for server-side speech detection. Short pauses stay inside the same turn, first phonemes have pre-roll, and early speech is buffered during connection setup with a strict memory limit. Quiet standby sends no microphone audio. Noise calibration reduces missed quiet speech and background-noise turns. Deliberate interruptions retain their existing speaker-echo threshold. Already-completed replies no longer wait for an interruption acknowledgement. Filler audio is removed when real speech arrives.
+
+Voice response monitoring applies only to outstanding requests, never idle conversations. Stalled replies, failed uploads and transient disconnections reconnect without replaying previous commands; retries are bounded, and invalid credentials stop retrying. Failed microphone and speaker handles are cleared instead of leaving a false listening/playing state. Session guards reject stale queued callbacks. Local goodbye detection now receives trailing silence and still hides the assistant after the farewell.
+
+Encrypted preferences are reused per application context; encryption and isolated preference namespaces remain intact. Startup performs a bounded keyless connection warm-up without microphone audio or API credentials. Live synthetic tests cover consecutive spoken replies, manual interruptions, output format, and native tool schemas. Hardware microphone/output behavior still needs validation after manual installation; cloud latency varies. Installation remains user-initiated.

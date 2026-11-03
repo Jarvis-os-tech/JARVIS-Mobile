@@ -23,9 +23,12 @@ class PhoneSpeedAndSettingsTest {
         }
     }
     @Test fun lowLatencyBudgetIsAppliedOnlyToCompatibleNativeModel() {
-        val fast = JSONObject(LiveSessionModels.buildSetupJson()).getJSONObject("setup")
+        val fast = JSONObject(LiveSessionModels.buildSetupJson(model = "models/gemini-2.5-flash-native-audio-preview-12-2025")).getJSONObject("setup")
         assertEquals(0, fast.getJSONObject("generationConfig").getJSONObject("thinkingConfig").getInt("thinkingBudget"))
-        assertEquals(400, fast.getJSONObject("realtimeInputConfig").getJSONObject("automaticActivityDetection").getInt("silenceDurationMs"))
+        assertTrue(fast.getJSONObject("realtimeInputConfig").getJSONObject("automaticActivityDetection").getBoolean("disabled"))
+        val standard = JSONObject(LiveSessionModels.buildSetupJson()).getJSONObject("setup")
+        assertEquals("models/gemini-3.8-live", standard.getString("model"))
+        assertFalse(standard.getJSONObject("generationConfig").has("thinkingConfig"))
         val fallback = JSONObject(LiveSessionModels.buildSetupJson(model = "models/gemini-3.1-flash-live-preview")).getJSONObject("setup")
         assertFalse(fallback.getJSONObject("generationConfig").has("thinkingConfig"))
     }

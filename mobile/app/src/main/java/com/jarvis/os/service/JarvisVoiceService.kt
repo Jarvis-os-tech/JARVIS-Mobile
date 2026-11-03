@@ -13,6 +13,7 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.jarvis.os.JarvisApplication
 import com.jarvis.os.audio.AudioCaptureEngine
+import com.jarvis.os.audio.ManualVoiceInput
 import com.jarvis.os.audio.AudioPlaybackEngine
 import com.jarvis.os.audio.LocalFillerMixer
 import com.jarvis.os.audio.VadDetector
@@ -52,11 +53,19 @@ class JarvisVoiceService : Service() {
 
     private val captureEngine = AudioCaptureEngine()
     private val playbackEngine = AudioPlaybackEngine()
-    private val vadDetector = VadDetector(energyThreshold = 650.0)
+    private val vadDetector = VadDetector(energyThreshold = 350.0)
     private val fillerMixer = LocalFillerMixer()
     private val geminiClient = GeminiLiveClient()
+    private val manualInput = ManualVoiceInput(send = { frame ->
+        when (frame) {
+            ManualVoiceInput.Frame.Start -> geminiClient.sendActivity(true)
+            ManualVoiceInput.Frame.End -> geminiClient.sendActivity(false)
+            is ManualVoiceInput.Frame.Audio -> geminiClient.sendAudio(frame.pcm)
+        }
+    })
     private val deviceTools by lazy { DeviceToolClient(this) }
     private var sessionIdentity = ""
+    private var voiceApiKey = ""
     private val toolCalls = mutableSetOf<String>()
     private val toolResults = mutableMapOf<String, String>()
     private var pendingToolCalls = 0
@@ -77,13 +86,19 @@ class JarvisVoiceService : Service() {
     @Volatile private var suppressOldResponse = false
     @Volatile private var modelTurnFinished = false
     @Volatile private var closingForGoodbye = false
-    @Volatile private var userSpokeInTurn = false
-    @Volatile private var postSpeechSilenceFrames = 0
     @Volatile private var lastUserSpeechAt = 0L
     @Volatile private var firstReplyAudioPending = false
     private val userTranscriptBuilder = java.lang.StringBuilder()
     private val assistantTranscriptBuilder = java.lang.StringBuilder()
     private var goodbyeTimeout: Job? = null
+    private var healthJob: Job? = null
+    private var recoveryJob: Job? = null
+    @Volatile private var recoveryAttempts = 0
+    private var lastMicRestartAt = 0L
+    @Volatile private var responsePending = false
+    @Volatile private var replyInProgress = false
+    @Volatile private var lastVoiceProgressAt = 0L
+    @Volatile private var bargeAckAt = 0L
 
     inner class LocalBinder : Binder() {
         fun getService(): JarvisVoiceService = this@JarvisVoiceService
@@ -195,6 +210,15 @@ class JarvisVoiceService : Service() {
     }
 
     private fun setupGeminiCallbacks() {
+        playbackEngine.onPlaybackFailure = {
+            serviceScope.launch {
+                if (enabled && activeSession && !closingForGoodbye) {
+                    responsePending = false; replyInProgress = false
+                    updateState(ConversationState.ERROR)
+                    updateNotification("Speaker unavailable. Check media output, then ask again.")
+                }
+            }
+        }
         playbackEngine.onPlaybackDrained = {
             serviceScope.launch {
                 if (closingForGoodbye) {
@@ -203,27 +227,41 @@ class JarvisVoiceService : Service() {
             }
         }
         geminiClient.onConnectionStateChanged = { ready ->
+            val eventSession = sessionIdentity
             serviceScope.launch {
+                if (eventSession != sessionIdentity) return@launch
                 if (ready && activeSession) {
                     updateState(ConversationState.LISTENING)
                     val command = commandAfterWake
                     commandAfterWake = null
-                    geminiClient.sendText(command ?: "The user just said Hey Jarvis. Say a short greeting and ask how you can help. Do not say the wake phrase yourself.")
-                } else if (!ready && activeSession) {
-                    enterStandby()
-                    updateNotification("Connection lost. Say Hey Jarvis to retry.")
+                    val earlySpeech = try { manualInput.connected() } catch (_: ManualVoiceInput.TransportFailure) {
+                        recoverConversation("Voice input could not upload")
+                        return@launch
+                    }
+                    lastVoiceProgressAt = android.os.SystemClock.elapsedRealtime()
+                    if (!earlySpeech) {
+                        responsePending = true
+                        firstReplyAudioPending = true
+                        geminiClient.sendText(command ?: "The user just said Hey Jarvis. Say a short greeting and ask how you can help. Do not say the wake phrase yourself.")
+                    } else Log.i(TAG, "Early user speech delivered; initial greeting skipped")
+                } else if (!ready && activeSession && !closingForGoodbye) {
+                    if (geminiClient.recoverableFailure) recoverConversation("Voice connection interrupted")
+                    else {
+                        enterStandby()
+                        updateNotification("Voice setup failed. Check your key and internet connection, then retry.")
+                    }
                 }
             }
         }
         geminiClient.onUserTranscript = { text ->
             synchronized(responseLock) {
-                userTranscriptBuilder.append(text)
+                if (activeSession) userTranscriptBuilder.append(text)
             }
         }
 
         geminiClient.onAssistantTranscript = { text ->
             synchronized(responseLock) {
-                assistantTranscriptBuilder.append(text)
+                if (activeSession) assistantTranscriptBuilder.append(text)
             }
         }
 
@@ -232,11 +270,18 @@ class JarvisVoiceService : Service() {
             synchronized(responseLock) {
                 if (suppressOldResponse || !activeSession) return@audio
                 modelTurnFinished = false
+                responsePending = false
+                replyInProgress = true
+                recoveryAttempts = 0
+                lastVoiceProgressAt = android.os.SystemClock.elapsedRealtime()
                 if (firstReplyAudioPending && lastUserSpeechAt > 0) {
                     firstReplyAudioPending = false
                     Log.i(TAG, "First reply audio ${android.os.SystemClock.elapsedRealtime() - lastUserSpeechAt}ms after last user speech frame")
                 }
-                playbackEngine.playPcm(fillerMixer.feedGeminiAudio(rawPcm))
+                val replacingFiller = fillerMixer.isFillerActive
+                val speech = fillerMixer.feedGeminiAudio(rawPcm)
+                if (replacingFiller) playbackEngine.cancel()
+                playbackEngine.playPcm(speech)
             }
 
             serviceScope.launch {
@@ -246,13 +291,17 @@ class JarvisVoiceService : Service() {
             }
         }
 
-        geminiClient.onTurnComplete = {
+        geminiClient.onTurnComplete = completed@ {
+            if (!activeSession || closingForGoodbye) return@completed
             Log.d(TAG, "Model turn complete")
             val userText: String
             val assistantText: String
             synchronized(responseLock) {
                 suppressOldResponse = false
                 modelTurnFinished = true
+                bargeAckAt = 0L
+                replyInProgress = false
+                if (!firstReplyAudioPending) responsePending = false
                 userText = userTranscriptBuilder.toString().trim()
                 assistantText = assistantTranscriptBuilder.toString().trim()
                 userTranscriptBuilder.setLength(0)
@@ -270,13 +319,15 @@ class JarvisVoiceService : Service() {
             finishReplyWhenDrained()
         }
 
-        geminiClient.onInterrupted = {
+        geminiClient.onInterrupted = interrupted@ {
+            if (!activeSession || closingForGoodbye) return@interrupted
             Log.i(TAG, "Server confirmed voice interruption")
             val assistantText: String
             synchronized(responseLock) {
                 playbackEngine.cancel()
                 fillerMixer.cancel()
                 suppressOldResponse = false
+                bargeAckAt = 0L
                 modelTurnFinished = false
                 assistantText = assistantTranscriptBuilder.toString().trim()
                 assistantTranscriptBuilder.setLength(0)
@@ -292,7 +343,9 @@ class JarvisVoiceService : Service() {
             }
         }
 
-        geminiClient.onToolCall = { call ->
+        geminiClient.onToolCall = tool@ { call ->
+            val callSession = sessionIdentity
+            if (!activeSession || closingForGoodbye) return@tool
             if (call.name == "play_local_filler") {
                 val contextType = call.args["context_type"] as? String ?: "general"
                 val fillerAudio = fillerMixer.triggerFiller(contextType)
@@ -302,7 +355,7 @@ class JarvisVoiceService : Service() {
                 geminiClient.sendToolResponse(call.id, call.name, "{\"status\":\"filler_active\"}")
             } else {
                 serviceScope.launch {
-                    if (!activeSession) return@launch
+                    if (!activeSession || sessionIdentity != callSession) return@launch
                     toolResults[call.id]?.let { result ->
                         geminiClient.sendToolResponse(call.id, call.name, result)
                         return@launch
@@ -310,6 +363,7 @@ class JarvisVoiceService : Service() {
                     if (!toolCalls.add(call.id)) return@launch
                     val identity = sessionIdentity
                     pendingToolCalls++
+                    lastVoiceProgressAt = android.os.SystemClock.elapsedRealtime()
                     updateState(ConversationState.THINKING)
                     try {
                         if (call.name == "phone_turn_off") {
@@ -327,6 +381,8 @@ class JarvisVoiceService : Service() {
                             if (activeSession && sessionIdentity == identity) {
                                 toolResults[call.id] = result
                                 geminiClient.sendToolResponse(call.id, call.name, result)
+                                responsePending = true
+                                lastVoiceProgressAt = android.os.SystemClock.elapsedRealtime()
                             }
                         }
                     } finally {
@@ -348,6 +404,9 @@ class JarvisVoiceService : Service() {
             updateNotification("Add your Gemini key or scan your PC JARVIS QR code.")
             return
         }
+        voiceApiKey = apiKey
+        geminiClient.prewarm()
+        lastMicRestartAt = 0L
         enabled = true
         serviceScope.launch(Dispatchers.IO) { deviceTools.refreshPcTools() }
         updateNotification("Preparing Hey Jarvis…")
@@ -356,78 +415,8 @@ class JarvisVoiceService : Service() {
             withContext(Dispatchers.IO) { wakeDetector.prepare() }
             if (!enabled) return@launch
             enterStandby()
-            val started = captureEngine.startCapture(serviceScope) { chunk ->
-            if (!enabled) return@startCapture
-            if (closingForGoodbye) return@startCapture
-            if (!activeSession) {
-                if (wakeDetector.process(chunk)) serviceScope.launch { activateConversation(apiKey) }
-                return@startCapture
-            }
-            if (!playbackEngine.hasPendingAudio && wakeDetector.processGoodbye(chunk)) {
-                serviceScope.launch { sayGoodbyeAndStandby() }
-                return@startCapture
-            }
-            // Voice activity detection
-            val vadResult = vadDetector.process(chunk)
-
-            when (vadResult.state) {
-                VadState.SPEECH -> {
-                    if (!playbackEngine.hasPendingAudio) {
-                        lastUserSpeechAt = android.os.SystemClock.elapsedRealtime()
-                        firstReplyAudioPending = true
-                    }
-                    userSpokeInTurn = true
-                    postSpeechSilenceFrames = 0
-                    // Cut the speaker locally on deliberate user barge-in (sufficient duration and energy over speaker audio).
-                    if (vadResult.speechFrameCount >= 10 && vadResult.energy >= 2500.0 && playbackEngine.hasPendingAudio) {
-                        synchronized(responseLock) {
-                            if (!suppressOldResponse && playbackEngine.hasPendingAudio) {
-                                suppressOldResponse = true
-                                playbackEngine.cancel()
-                                fillerMixer.cancel()
-                                Log.i(TAG, "Local voice interruption: speaker stopped; microphone stays active")
-                            }
-                        }
-                    }
-                    serviceScope.launch {
-                        if (activeSession && _currentState.value != ConversationState.LISTENING) {
-                            updateState(ConversationState.LISTENING)
-                        }
-                    }
-                    geminiClient.sendAudio(chunk)
-                }
-
-                VadState.HANGOVER -> {
-                    // Still within speech continuation window
-                    postSpeechSilenceFrames = 0
-                    geminiClient.sendAudio(chunk)
-                }
-
-                VadState.SILENCE -> {
-                    // The server's automatic VAD needs silence to end the user's turn.
-                    geminiClient.sendAudio(chunk)
-                    if (userSpokeInTurn) {
-                        postSpeechSilenceFrames++
-                        if (postSpeechSilenceFrames >= 20) { // ~400ms silence after speech
-                            userSpokeInTurn = false
-                            postSpeechSilenceFrames = 0
-                            serviceScope.launch {
-                                if (activeSession && _currentState.value == ConversationState.LISTENING) {
-                                    // User finished speaking, now waiting for response
-                                    updateState(ConversationState.THINKING)
-                                }
-                            }
-                        }
-                    }
-                }
-
-                VadState.ATTACK -> {
-                    // Attack onset, buffer or stream
-                    postSpeechSilenceFrames = 0
-                    geminiClient.sendAudio(chunk)
-                }
-            }
-        }
+            val started = captureEngine.startCapture(serviceScope, ::processMicrophoneChunk)
+            if (started) startHealthMonitor()
             if (!started) {
                 enabled = false
                 updateState(ConversationState.ERROR)
@@ -444,10 +433,114 @@ class JarvisVoiceService : Service() {
         }
     }
 
-    private fun activateConversation(apiKey: String) {
-        if (!enabled || activeSession) return
-        activeSession = true
-        commandAfterWake = wakeDetector.consumeWakeCommand()
+    private fun processMicrophoneChunk(chunk: ByteArray) {
+        if (!enabled || closingForGoodbye) return
+        if (!activeSession) {
+            vadDetector.observeBackground(chunk)
+            if (wakeDetector.process(chunk)) serviceScope.launch { activateConversation(voiceApiKey) }
+            return
+        }
+        if (!playbackEngine.hasPendingAudio && wakeDetector.processGoodbye(chunk)) {
+            serviceScope.launch { sayGoodbyeAndStandby() }
+            return
+        }
+        val vad = vadDetector.process(chunk)
+        val speech = vad.state == VadState.SPEECH
+        val playing = playbackEngine.hasPendingAudio
+        val deliberate = vad.speechFrameCount >= 10 && vad.energy >= 2500.0
+        val opening = !manualInput.turnOpen && speech && (!playing || deliberate)
+        if (opening) {
+            synchronized(responseLock) {
+                if (playing || responsePending || replyInProgress) {
+                    // A completed server turn needs no interruption acknowledgement.
+                    suppressOldResponse = !modelTurnFinished
+                    bargeAckAt = if (suppressOldResponse) android.os.SystemClock.elapsedRealtime() else 0L
+                    playbackEngine.cancel(); fillerMixer.cancel()
+                }
+                responsePending = false; replyInProgress = false
+                firstReplyAudioPending = true
+            }
+        }
+        if (speech && (!playing || deliberate)) lastUserSpeechAt = android.os.SystemClock.elapsedRealtime()
+        try {
+            val result = manualInput.process(chunk, speech, playing, deliberate)
+            if (result.opened) serviceScope.launch {
+                if (activeSession) updateState(ConversationState.LISTENING)
+            }
+            if (result.closed) {
+                responsePending = true
+                lastVoiceProgressAt = android.os.SystemClock.elapsedRealtime()
+                Log.i(TAG, "User speech end sent explicitly")
+                serviceScope.launch { if (activeSession) updateState(ConversationState.THINKING) }
+            }
+        } catch (_: ManualVoiceInput.TransportFailure) {
+            serviceScope.launch { recoverConversation("Voice input backlog or upload failure") }
+        }
+    }
+
+    private fun startHealthMonitor() {
+        healthJob?.cancel()
+        healthJob = serviceScope.launch {
+            while (enabled) {
+                delay(500)
+                val now = android.os.SystemClock.elapsedRealtime()
+                if (!captureEngine.isCapturing || now - captureEngine.lastFrameAt > 5000) {
+                    if (lastMicRestartAt > 0 && now - lastMicRestartAt < 10000) {
+                        stopVoicePipeline()
+                        isRunning = false
+                        updateState(ConversationState.ERROR)
+                        updateNotification("Microphone unavailable. Check microphone permission and tap Start.")
+                        return@launch
+                    }
+                    lastMicRestartAt = now
+                    captureEngine.stopCapture()
+                    if (!captureEngine.startCapture(serviceScope, ::processMicrophoneChunk)) {
+                        stopVoicePipeline()
+                        isRunning = false
+                        updateState(ConversationState.ERROR)
+                        updateNotification("Microphone unavailable. Open JARVIS to retry.")
+                        return@launch
+                    }
+                    if (activeSession) recoverConversation("Microphone stream restarted")
+                }
+                if (!activeSession || !geminiClient.connected || pendingToolCalls > 0 || manualInput.turnOpen || closingForGoodbye) continue
+                if (bargeAckAt > 0 && now - bargeAckAt > 4000) {
+                    recoverConversation("Interruption acknowledgement timed out")
+                } else if ((responsePending || replyInProgress) && now - lastVoiceProgressAt > 12000) {
+                    recoverConversation("Voice response stalled")
+                }
+            }
+        }
+    }
+
+    private fun recoverConversation(reason: String) {
+        if (!enabled || !activeSession || closingForGoodbye || recoveryJob?.isActive == true) return
+        Log.w(TAG, "Recovering voice: $reason")
+        val key = com.jarvis.os.sync.ApiCredentials.gemini(this)
+        val identity = sessionIdentity
+        enterStandby(reconnecting = true)
+        if (++recoveryAttempts > 3) {
+            updateState(ConversationState.ERROR)
+            updateNotification("Voice connection unavailable. Check internet or your key, then say Hey Jarvis.")
+            return
+        }
+        updateState(ConversationState.THINKING)
+        updateNotification("Reconnecting voice · previous actions will not be repeated")
+        recoveryJob = serviceScope.launch {
+            // Let any already-issued action finish; never replay it after a connection loss.
+            while (pendingToolCalls > 0 && enabled) delay(200)
+            delay(500L * recoveryAttempts)
+            if (enabled && !activeSession && !closingForGoodbye && sessionIdentity == identity) activateConversation(key, recovering = true)
+        }
+    }
+
+    private fun activateConversation(apiKey: String, recovering: Boolean = false) {
+        if (!enabled || activeSession || pendingToolCalls > 0) return
+        if (!recovering) recoveryAttempts = 0
+        commandAfterWake = if (recovering) "The voice connection has recovered. Briefly say you are ready. Do not repeat any earlier command or action; wait for a new user request."
+            else wakeDetector.consumeWakeCommand()
+        manualInput.start()
+        responsePending = false; replyInProgress = false; bargeAckAt = 0L
         lastUserSpeechAt = 0L
         firstReplyAudioPending = false
         closingForGoodbye = false
@@ -462,8 +555,7 @@ class JarvisVoiceService : Service() {
             assistantTranscriptBuilder.setLength(0)
         }
         vadDetector.reset()
-        userSpokeInTurn = false
-        postSpeechSilenceFrames = 0
+        activeSession = true
         glyphController.onWakeWordDetected()
         Log.i(TAG, "Hey Jarvis detected; activating conversation")
         updateState(ConversationState.THINKING)
@@ -492,7 +584,7 @@ class JarvisVoiceService : Service() {
         }
     }
 
-    private fun enterStandby() {
+    private fun enterStandby(reconnecting: Boolean = false) {
         val userText: String
         val assistantText: String
         synchronized(responseLock) {
@@ -511,17 +603,20 @@ class JarvisVoiceService : Service() {
             CloudMemorySyncWorker.syncNow(this@JarvisVoiceService)
         }
         activeSession = false
+        manualInput.reset()
+        responsePending = false; replyInProgress = false; bargeAckAt = 0L
         suppressOldResponse = false
         modelTurnFinished = false
-        userSpokeInTurn = false
-        postSpeechSilenceFrames = 0
         geminiClient.disconnect()
         playbackEngine.cancel()
         fillerMixer.cancel()
         wakeDetector.reset()
-        updateState(ConversationState.IDLE)
-        if (enabled) updateNotification("Standby · Say Hey Jarvis")
-        Log.i(TAG, "Standby: local wake listener; cloud audio disabled")
+        if (!reconnecting) {
+            recoveryJob?.cancel()
+            updateState(ConversationState.IDLE)
+            if (enabled) updateNotification("Standby · Say Hey Jarvis")
+        }
+        Log.i(TAG, if (reconnecting) "Voice session reset for recovery" else "Standby: local wake listener; cloud audio disabled")
     }
 
     private fun finishReplyWhenDrained() {
@@ -533,6 +628,11 @@ class JarvisVoiceService : Service() {
     }
 
     private fun stopVoicePipeline() {
+        enabled = false
+        activeSession = false
+        healthJob?.cancel(); recoveryJob?.cancel()
+        manualInput.reset()
+        responsePending = false; replyInProgress = false; bargeAckAt = 0L
         val userText: String
         val assistantText: String
         synchronized(responseLock) {
@@ -552,6 +652,7 @@ class JarvisVoiceService : Service() {
         }
         enabled = false
         activeSession = false
+        voiceApiKey = ""
         startupJob?.cancel()
         captureEngine.stopCapture()
         playbackEngine.cancel()

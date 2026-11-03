@@ -25,6 +25,8 @@ class AudioCaptureEngine(
     private var captureJob: Job? = null
     private var audioRecord: AudioRecord? = null
     private var echoCanceler: AcousticEchoCanceler? = null
+    @Volatile var lastFrameAt: Long = 0
+        private set
 
     val isCapturing: Boolean
         get() = isRecording.get()
@@ -60,6 +62,7 @@ class AudioCaptureEngine(
                 return false
             }
 
+            audioRecord = record
             if (AcousticEchoCanceler.isAvailable()) {
                 try {
                     echoCanceler = AcousticEchoCanceler.create(record.audioSessionId)?.apply { enabled = true }
@@ -68,14 +71,15 @@ class AudioCaptureEngine(
                 }
             }
             record.startRecording()
-            audioRecord = record
             isRecording.set(true)
+            lastFrameAt = android.os.SystemClock.elapsedRealtime()
 
             captureJob = scope.launch(Dispatchers.IO) {
                 val buffer = ByteArray(chunkByteSize)
                 Log.i(TAG, "AudioCapture loop started: $sampleRate Hz, $chunkByteSize bytes/frame, source=$audioSource")
 
                 try {
+                    var readErrors = 0
                     while (isActive && isRecording.get()) {
                         var bytesRead = 0
                         while (bytesRead < chunkByteSize && isActive && isRecording.get()) {
@@ -87,8 +91,10 @@ class AudioCaptureEngine(
                             )
                             if (read > 0) {
                                 bytesRead += read
+                                readErrors = 0
                             } else if (read < 0) {
                                 Log.e(TAG, "AudioRecord read error: $read")
+                                if (++readErrors >= 3) throw java.io.IOException("Microphone stream stopped")
                                 kotlinx.coroutines.delay(100)
                                 break
                             } else {
@@ -96,7 +102,8 @@ class AudioCaptureEngine(
                             }
                         }
 
-                        if (bytesRead == chunkByteSize) {
+                        if (bytesRead == chunkByteSize && isActive && isRecording.get() && audioRecord === record) {
+                            lastFrameAt = android.os.SystemClock.elapsedRealtime()
                             onChunk(buffer.clone())
                         }
                     }
@@ -105,15 +112,26 @@ class AudioCaptureEngine(
                 } catch (e: Exception) {
                     Log.e(TAG, "Audio capture loop exception: ${e.message}", e)
                 } finally {
+                    synchronized(this@AudioCaptureEngine) {
+                        if (audioRecord === record) {
+                            isRecording.set(false)
+                            try { record.stop() } catch (_: Exception) { }
+                            record.release()
+                            echoCanceler?.release(); echoCanceler = null
+                            audioRecord = null
+                        }
+                    }
                     Log.i(TAG, "Audio capture loop finished")
                 }
             }
 
             return true
         } catch (e: SecurityException) {
+            stopCapture()
             Log.e(TAG, "Missing RECORD_AUDIO permission: ${e.message}", e)
             return false
         } catch (e: Exception) {
+            stopCapture()
             Log.e(TAG, "Failed to start AudioRecord: ${e.message}", e)
             return false
         }
@@ -121,9 +139,8 @@ class AudioCaptureEngine(
 
     @Synchronized
     fun stopCapture() {
-        if (!isRecording.compareAndSet(true, false)) {
-            return
-        }
+        val wasRecording = isRecording.getAndSet(false)
+        if (!wasRecording && audioRecord == null && echoCanceler == null) return
 
         try {
             captureJob?.cancel()

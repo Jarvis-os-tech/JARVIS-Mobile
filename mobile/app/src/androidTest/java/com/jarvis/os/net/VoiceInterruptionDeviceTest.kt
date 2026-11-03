@@ -49,10 +49,12 @@ class VoiceInterruptionDeviceTest {
             Thread.sleep(350)
             val question = instrumentation.context.assets.open("ordinary.pcm").use { it.readBytes() }
             val pcm = ByteArray(3200) + question + ByteArray(64000)
+            assertTrue(client.sendActivity(true))
             for (offset in pcm.indices step 640) {
                 assertTrue(client.sendAudio(pcm.copyOfRange(offset, minOf(offset + 640, pcm.size))))
                 Thread.sleep(20)
             }
+            assertTrue(client.sendActivity(false))
             assertTrue("Speaking over the response must trigger interruption", interrupted.await(8, TimeUnit.SECONDS))
             assertTrue("Interrupted conversation must answer the new question", answered.await(25, TimeUnit.SECONDS))
         } finally {

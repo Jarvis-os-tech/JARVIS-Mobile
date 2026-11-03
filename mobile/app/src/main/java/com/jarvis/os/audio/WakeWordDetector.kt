@@ -12,6 +12,8 @@ class WakeWordDetector(private val context: Context) {
     private var recognizer: Recognizer? = null
     private var goodbyeRecognizer: Recognizer? = null
     private var wakeCommand: String? = null
+    private var goodbyeActive = false
+    private var goodbyeQuietFrames = 0
 
     // Standby low-power gating state
     private val preRollBuffers = Array(PRE_ROLL_CHUNKS) { ByteArray(0) }
@@ -204,9 +206,15 @@ class WakeWordDetector(private val context: Context) {
     @Synchronized
     fun processGoodbye(pcm: ByteArray): Boolean {
         val decoder = goodbyeRecognizer ?: return false
-        if (VadDetector.calculateRms(pcm) < BASE_ENERGY_THRESHOLD) return false
-        if (!decoder.acceptWaveForm(pcm, pcm.size)) return false
-        val result = try { JSONObject(decoder.result) } catch (_: Exception) { return false }
+        val voiced = VadDetector.calculateRms(pcm) >= BASE_ENERGY_THRESHOLD
+        if (!voiced && !goodbyeActive) return false
+        goodbyeActive = true
+        goodbyeQuietFrames = if (voiced) 0 else goodbyeQuietFrames + 1
+        val complete = decoder.acceptWaveForm(pcm, pcm.size)
+        if (!complete && goodbyeQuietFrames < 60) return false
+        val raw = if (complete) decoder.result else decoder.finalResult
+        decoder.reset(); goodbyeActive = false; goodbyeQuietFrames = 0
+        val result = try { JSONObject(raw) } catch (_: Exception) { return false }
         val text = result.optString("text").trim().lowercase().replace(Regex("\\s+"), " ")
         if (!GoodbyePhrase.matches(text)) return false
         val words = result.optJSONArray("result") ?: return true
@@ -219,7 +227,7 @@ class WakeWordDetector(private val context: Context) {
     }
 
     @Synchronized
-    fun resetGoodbye() { goodbyeRecognizer?.reset() }
+    fun resetGoodbye() { goodbyeRecognizer?.reset(); goodbyeActive = false; goodbyeQuietFrames = 0 }
 
     @Synchronized
     fun close() {

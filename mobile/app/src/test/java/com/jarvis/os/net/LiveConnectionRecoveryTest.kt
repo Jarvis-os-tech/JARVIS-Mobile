@@ -87,4 +87,32 @@ class LiveConnectionRecoveryTest {
             assertEquals(2, factory.sockets.size)
         } finally { client.disconnect() }
     }
+    @Test fun manualSpeechMessagesRemainOrderedOnTheLiveSocket() {
+        val factory = Factory()
+        val client = GeminiLiveClient(socketFactory = factory)
+        try {
+            client.connect("test-key"); factory.ready(0)
+            assertTrue(client.sendActivity(true))
+            assertTrue(client.sendAudio(ByteArray(640)))
+            assertTrue(client.sendActivity(false))
+            val messages = factory.sockets[0].messages.map { org.json.JSONObject(it).getJSONObject("realtimeInput") }
+            assertTrue(messages[0].has("activityStart"))
+            assertTrue(messages[1].has("audio"))
+            assertTrue(messages[2].has("activityEnd"))
+        } finally { client.disconnect() }
+    }
+    @Test fun accessDeniedDoesNotEnterAnAutomaticReconnectLoop() {
+        val factory = Factory()
+        val client = GeminiLiveClient(socketFactory = factory)
+        try {
+            client.connect("test-key")
+            val response = Response.Builder().request(factory.sockets[0].request())
+                .protocol(Protocol.HTTP_1_1).code(403).message("Access denied").build()
+            factory.listeners[0].onFailure(factory.sockets[0], IOException("Rejected"), response)
+            assertFalse(client.recoverableFailure)
+            assertEquals(1, factory.sockets.size)
+            assertFalse(client.connected)
+        } finally { client.disconnect() }
+    }
+
 }

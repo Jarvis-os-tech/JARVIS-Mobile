@@ -22,13 +22,16 @@ class GeminiLiveClient(
     private val socketFactory: WebSocket.Factory = client,
     private val setupTimeoutMs: Long = 15000
 ) {
-    private var webSocket: WebSocket? = null
+    @Volatile private var webSocket: WebSocket? = null
     private val isConnected = AtomicBoolean(false)
     private val isConnecting = AtomicBoolean(false)
     private var userDisconnected = false
     private var activeModelIndex = 0
+    private val prewarmed = AtomicBoolean(false)
     private var generation = 0L
     private var terminalHandled = false
+    @Volatile var recoverableFailure = false
+        private set
     private var setupTimeout: java.util.concurrent.ScheduledFuture<*>? = null
 
     @Synchronized private fun isCurrent(attempt: Long): Boolean =
@@ -50,6 +53,17 @@ class GeminiLiveClient(
     val connected: Boolean
         get() = isConnected.get()
 
+    /** Warm DNS/TLS without opening a voice session or sending a key or microphone audio. */
+    fun prewarm() {
+        if (!prewarmed.compareAndSet(false, true)) return
+        val request = Request.Builder().url("https://generativelanguage.googleapis.com/").head().build()
+        client.newBuilder().callTimeout(5, TimeUnit.SECONDS).connectTimeout(3, TimeUnit.SECONDS)
+            .readTimeout(2, TimeUnit.SECONDS).build().newCall(request).enqueue(object : okhttp3.Callback {
+                override fun onFailure(call: okhttp3.Call, error: java.io.IOException) { }
+                override fun onResponse(call: okhttp3.Call, response: Response) { response.close() }
+            })
+    }
+
     /**
      * Connect to the Gemini Live WebSocket endpoint and send setup handshake.
      */
@@ -67,6 +81,7 @@ class GeminiLiveClient(
         }
 
         userDisconnected = false
+        recoverableFailure = false
         currentApiKey = apiKey
         currentVoice = voice
         currentSystemPrompt = systemPrompt
@@ -212,12 +227,14 @@ class GeminiLiveClient(
             return
         }
 
+        recoverableFailure = code in setOf(0, 1000, 1001, 1006, 1011, 1012, 1013, 429, 500, 502, 503, 504)
         onConnectionStateChanged?.invoke(false)
     }
 
     /**
      * Stream an ongoing 16,000 Hz mono PCM chunk to Gemini Live.
      */
+    @Synchronized
     fun sendAudio(chunk: ByteArray): Boolean {
         val ws = webSocket ?: return false
         if (!isConnected.get()) return false
@@ -226,6 +243,13 @@ class GeminiLiveClient(
         return ws.send(payload)
     }
 
+    @Synchronized
+    fun sendActivity(start: Boolean): Boolean {
+        if (!isConnected.get()) return false
+        return webSocket?.send(LiveSessionModels.buildActivityJson(start)) ?: false
+    }
+
+    @Synchronized
     fun sendText(text: String): Boolean {
         if (!connected) return false
         val part = org.json.JSONObject().put("text", text)
@@ -239,6 +263,7 @@ class GeminiLiveClient(
     /**
      * Respond to an executed tool call (e.g. play_local_filler acknowledgement).
      */
+    @Synchronized
     fun sendToolResponse(callId: String, name: String, resultJson: String): Boolean {
         val ws = webSocket ?: return false
         if (!isConnected.get()) return false

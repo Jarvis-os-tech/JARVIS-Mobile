@@ -48,10 +48,12 @@ class GeminiVoiceDeviceTest {
                 .open("ordinary.pcm").use { it.readBytes() }
             repeat(2) { turn ->
                 val pcm = ByteArray(6400) + question + ByteArray(64000)
+                assertTrue(client.sendActivity(true))
                 for (offset in pcm.indices step 640) {
                     assertTrue("Audio must be queued", client.sendAudio(pcm.copyOfRange(offset, minOf(offset + 640, pcm.size))))
                     Thread.sleep(20)
                 }
+                assertTrue(client.sendActivity(false))
                 android.util.Log.i("GeminiVoiceDeviceTest", "Spoken question ${turn + 1} sent")
                 assertTrue("Spoken question ${turn + 1} must receive a completed audio reply",
                     (completedReplies.poll(20, TimeUnit.SECONDS) ?: 0) > 4800)
