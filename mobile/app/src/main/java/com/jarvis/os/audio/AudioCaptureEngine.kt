@@ -27,6 +27,7 @@ class AudioCaptureEngine(
     private var echoCanceler: AcousticEchoCanceler? = null
     @Volatile var lastFrameAt: Long = 0
         private set
+    @Volatile var onFailureListener: ((Exception) -> Unit)? = null
 
     val isCapturing: Boolean
         get() = isRecording.get()
@@ -80,10 +81,18 @@ class AudioCaptureEngine(
 
                 try {
                     var readErrors = 0
+                    var restartAttempts = 0
+                    val maxRestarts = 5
+                    var currentRecord = record
+
                     while (isActive && isRecording.get()) {
                         var bytesRead = 0
                         while (bytesRead < chunkByteSize && isActive && isRecording.get()) {
-                            val read = record.read(
+                            val rec = currentRecord
+                            if (rec == null || rec.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
+                                break
+                            }
+                            val read = rec.read(
                                 buffer,
                                 bytesRead,
                                 chunkByteSize - bytesRead,
@@ -92,9 +101,63 @@ class AudioCaptureEngine(
                             if (read > 0) {
                                 bytesRead += read
                                 readErrors = 0
+                                restartAttempts = 0
                             } else if (read < 0) {
                                 Log.e(TAG, "AudioRecord read error: $read")
-                                if (++readErrors >= 3) throw java.io.IOException("Microphone stream stopped")
+                                if (++readErrors >= 3) {
+                                    if (++restartAttempts <= maxRestarts) {
+                                        Log.w(TAG, "Releasing and re-initializing AudioRecord after error ($restartAttempts/$maxRestarts)")
+                                        try { currentRecord?.stop() } catch (_: Exception) { }
+                                        try { currentRecord?.release() } catch (_: Exception) { }
+
+                                        kotlinx.coroutines.delay(400) // bounded short backoff
+
+                                        val channelConfig = AudioFormat.CHANNEL_IN_MONO
+                                        val audioFormat = AudioFormat.ENCODING_PCM_16BIT
+                                        val minBufferSize = AudioRecord.getMinBufferSize(sampleRate, channelConfig, audioFormat)
+                                        val bufferSize = maxOf(minBufferSize, chunkByteSize * 4)
+
+                                        val newRecord = try {
+                                            AudioRecord(
+                                                audioSource,
+                                                sampleRate,
+                                                channelConfig,
+                                                audioFormat,
+                                                bufferSize
+                                            )
+                                        } catch (e: Exception) {
+                                            Log.w(TAG, "AudioRecord re-creation failed: ${e.message}")
+                                            null
+                                        }
+
+                                        if (newRecord == null || newRecord.state != AudioRecord.STATE_INITIALIZED) {
+                                            try { newRecord?.release() } catch (_: Exception) { }
+                                            if (restartAttempts >= maxRestarts) {
+                                                throw java.io.IOException("AudioRecord re-initialization failed after $maxRestarts attempts")
+                                            }
+                                            kotlinx.coroutines.delay(400)
+                                            break
+                                        }
+
+                                        try {
+                                            newRecord.startRecording()
+                                        } catch (e: Exception) {
+                                            Log.w(TAG, "newRecord.startRecording failed: ${e.message}")
+                                            try { newRecord.release() } catch (_: Exception) { }
+                                            if (restartAttempts >= maxRestarts) throw e
+                                            kotlinx.coroutines.delay(400)
+                                            break
+                                        }
+
+                                        synchronized(this@AudioCaptureEngine) {
+                                            audioRecord = newRecord
+                                        }
+                                        currentRecord = newRecord
+                                        readErrors = 0
+                                    } else {
+                                        throw java.io.IOException("Microphone stream permanently failed after $maxRestarts re-init retries")
+                                    }
+                                }
                                 kotlinx.coroutines.delay(100)
                                 break
                             } else {
@@ -102,7 +165,7 @@ class AudioCaptureEngine(
                             }
                         }
 
-                        if (bytesRead == chunkByteSize && isActive && isRecording.get() && audioRecord === record) {
+                        if (bytesRead == chunkByteSize && isActive && isRecording.get() && audioRecord === currentRecord) {
                             lastFrameAt = android.os.SystemClock.elapsedRealtime()
                             onChunk(buffer.clone())
                         }
@@ -111,15 +174,17 @@ class AudioCaptureEngine(
                     throw e
                 } catch (e: Exception) {
                     Log.e(TAG, "Audio capture loop exception: ${e.message}", e)
+                    onFailureListener?.invoke(e)
                 } finally {
                     synchronized(this@AudioCaptureEngine) {
-                        if (audioRecord === record) {
-                            isRecording.set(false)
-                            try { record.stop() } catch (_: Exception) { }
-                            record.release()
-                            echoCanceler?.release(); echoCanceler = null
-                            audioRecord = null
+                        isRecording.set(false)
+                        audioRecord?.let {
+                            try { it.stop() } catch (_: Exception) { }
+                            try { it.release() } catch (_: Exception) { }
                         }
+                        audioRecord = null
+                        echoCanceler?.release()
+                        echoCanceler = null
                     }
                     Log.i(TAG, "Audio capture loop finished")
                 }

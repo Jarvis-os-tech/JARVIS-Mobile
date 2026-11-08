@@ -95,6 +95,7 @@ class JarvisVoiceService : Service() {
     private var recoveryJob: Job? = null
     @Volatile private var recoveryAttempts = 0
     private var lastMicRestartAt = 0L
+    @Volatile private var micRestartFailures = 0
     @Volatile private var responsePending = false
     @Volatile private var replyInProgress = false
     @Volatile private var lastVoiceProgressAt = 0L
@@ -407,6 +408,13 @@ class JarvisVoiceService : Service() {
         voiceApiKey = apiKey
         geminiClient.prewarm()
         lastMicRestartAt = 0L
+        micRestartFailures = 0
+        captureEngine.onFailureListener = { error ->
+            Log.w(TAG, "Microphone capture engine error", error)
+            if (activeSession) {
+                serviceScope.launch { recoverConversation("Microphone stream error") }
+            }
+        }
         enabled = true
         serviceScope.launch(Dispatchers.IO) { deviceTools.refreshPcTools() }
         updateNotification("Preparing Hey Jarvis…")
@@ -484,8 +492,12 @@ class JarvisVoiceService : Service() {
             while (enabled) {
                 delay(500)
                 val now = android.os.SystemClock.elapsedRealtime()
-                if (!captureEngine.isCapturing || now - captureEngine.lastFrameAt > 5000) {
-                    if (lastMicRestartAt > 0 && now - lastMicRestartAt < 10000) {
+                if (captureEngine.isCapturing && now - captureEngine.lastFrameAt < 3000) {
+                    micRestartFailures = 0
+                } else if (!captureEngine.isCapturing || now - captureEngine.lastFrameAt > 6000) {
+                    micRestartFailures++
+                    if (micRestartFailures >= 4) {
+                        Log.e(TAG, "Microphone capture permanently failed after $micRestartFailures consecutive restart attempts")
                         stopVoicePipeline()
                         isRunning = false
                         updateState(ConversationState.ERROR)
@@ -493,15 +505,20 @@ class JarvisVoiceService : Service() {
                         return@launch
                     }
                     lastMicRestartAt = now
+                    Log.w(TAG, "Audio frame stalled or capture stopped; restarting capture (attempt $micRestartFailures/3)")
                     captureEngine.stopCapture()
+                    delay(300)
                     if (!captureEngine.startCapture(serviceScope, ::processMicrophoneChunk)) {
-                        stopVoicePipeline()
-                        isRunning = false
-                        updateState(ConversationState.ERROR)
-                        updateNotification("Microphone unavailable. Open JARVIS to retry.")
-                        return@launch
+                        if (micRestartFailures >= 3) {
+                            stopVoicePipeline()
+                            isRunning = false
+                            updateState(ConversationState.ERROR)
+                            updateNotification("Microphone unavailable. Open JARVIS to retry.")
+                            return@launch
+                        }
+                    } else if (activeSession) {
+                        recoverConversation("Microphone stream restarted")
                     }
-                    if (activeSession) recoverConversation("Microphone stream restarted")
                 }
                 if (!activeSession || !geminiClient.connected || pendingToolCalls > 0 || manualInput.turnOpen || closingForGoodbye) continue
                 if (bargeAckAt > 0 && now - bargeAckAt > 4000) {
@@ -654,7 +671,9 @@ class JarvisVoiceService : Service() {
         activeSession = false
         voiceApiKey = ""
         startupJob?.cancel()
+        captureEngine.onFailureListener = null
         captureEngine.stopCapture()
+        micRestartFailures = 0
         playbackEngine.cancel()
         playbackEngine.release()
         fillerMixer.cancel()

@@ -50,3 +50,9 @@ The phone now frames speech explicitly: a local turn ends after about 400 ms of 
 Voice response monitoring applies only to outstanding requests, never idle conversations. Stalled replies, failed uploads and transient disconnections reconnect without replaying previous commands; retries are bounded, and invalid credentials stop retrying. Failed microphone and speaker handles are cleared instead of leaving a false listening/playing state. Session guards reject stale queued callbacks. Local goodbye detection now receives trailing silence and still hides the assistant after the farewell.
 
 Encrypted preferences are reused per application context; encryption and isolated preference namespaces remain intact. Startup performs a bounded keyless connection warm-up without microphone audio or API credentials. Live synthetic tests cover consecutive spoken replies, manual interruptions, output format, and native tool schemas. Hardware microphone/output behavior still needs validation after manual installation; cloud latency varies. Installation remains user-initiated.
+
+### Microphone stream recovery and resilience (1.5.1)
+
+Hardens audio capture against transient `AudioRecord` buffer read errors and device hardware preemption (such as during phone locks, audio focus switches, and Android / Nothing OS background transitions). Instead of terminating the microphone stream and turning off the assistant on buffer read drops, `AudioCaptureEngine` automatically performs bounded exponential backoff and re-initialization of the audio record pipeline (up to 5 attempts).
+
+Service health monitoring now tracks consecutive failures with recovery rather than shutting down the voice pipeline on brief transient dropouts. Failure listeners trigger session reconnection safely while preserving voice state.
